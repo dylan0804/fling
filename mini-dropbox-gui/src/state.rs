@@ -1,6 +1,14 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use tokio::sync::mpsc::Receiver;
+
+#[derive(Debug)]
 pub enum AppState {
-    OnStartup,
+    OnStartup(Option<Receiver<String>>),
     Connecting,
     Ready,
+
+    WebSocketReady,
+    IrohReady,
+
+    PublishUser,
+    WaitForRegisterConfirmation,
 }

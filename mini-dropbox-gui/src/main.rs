@@ -1,22 +1,25 @@
-use std::{ops::ControlFlow, path::PathBuf, sync::Arc};
+use std::{clone, ops::ControlFlow, path::PathBuf, sync::Arc};
 
 use anyhow::anyhow;
 use eframe::CreationContext;
 use egui::{vec2, Align2, Vec2};
-use egui_toast::{Toast, ToastOptions, Toasts};
+use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
 use futures_util::{SinkExt, StreamExt};
 use names::{Generator, Name};
 use reqwest::Client;
 use rfd::FileDialog;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use serde_json::json;
+use tokio::sync::mpsc::{self, error::TrySendError, Receiver, Sender};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Bytes, Message, Utf8Bytes},
 };
 
-use crate::{events::AppEvent, state::AppState};
+use crate::{events::AppEvent, iroh_node::IrohNode, message::WebSocketMessage, state::AppState};
 
 mod events;
+mod iroh_node;
+mod message;
 mod state;
 mod toast;
 
@@ -39,26 +42,27 @@ async fn main() -> eframe::Result {
 pub struct MyApp {
     app_state: AppState,
     nickname: String,
-    reqwest_client: Arc<Client>,
     toasts: Toasts,
     files: Vec<PathBuf>,
     tx: Sender<AppEvent>,
     rx: Receiver<AppEvent>,
+    to_ws: Sender<String>,
 }
 
 impl MyApp {
     fn new(_cc: &CreationContext) -> Self {
         let (tx, rx) = mpsc::channel::<AppEvent>(100);
+        let (to_ws, from_ui) = mpsc::channel::<String>(100);
 
         let toasts = Toasts::new()
             .anchor(Align2::RIGHT_TOP, (-10., 10.))
             .order(egui::Order::Tooltip);
 
         Self {
-            reqwest_client: Arc::new(reqwest::Client::new()),
-            app_state: AppState::OnStartup,
+            app_state: AppState::OnStartup(Some(from_ui)),
             files: vec![],
             nickname: "".into(),
+            to_ws,
             toasts,
             rx,
             tx,
@@ -67,7 +71,7 @@ impl MyApp {
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.add_space(5.0);
 
@@ -83,43 +87,86 @@ impl eframe::App for MyApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // error handler
+            // event handler
             while let Ok(app_event) = self.rx.try_recv() {
                 match app_event {
-                    AppEvent::WebSocketFailed(e) => {
-                        self.show_error_toast(e.to_string());
-                    }
-                    AppEvent::WebSocketSuccess => {
+                    AppEvent::ReadyToPublishUser => self.app_state = AppState::PublishUser,
+                    AppEvent::AllSystemsGo => self.app_state = AppState::Ready,
+                    AppEvent::RegisterSuccess => {
+                        self.show_toast("Register success!", ToastKind::Success);
                         self.app_state = AppState::Ready;
+                    }
+                    AppEvent::FatalError(e) => {
+                        self.show_toast(e, ToastKind::Error);
                     }
                 }
             }
 
-            match &self.app_state {
-                AppState::OnStartup => {
+            match &mut self.app_state {
+                AppState::OnStartup(from_ui) => {
+                    let mut from_ui = from_ui.take().unwrap();
+
+                    // get nickname
                     let mut generator = Generator::with_naming(Name::Numbered);
                     self.nickname = generator.next().unwrap_or("Guest".into());
 
+                    // setup ws
                     let tx = self.tx.clone();
+
                     tokio::spawn(async move {
-                        let ws_stream = match connect_async("ws://127.0.0.1:3000/ws").await {
-                            Ok((stream, _)) => stream,
-                            Err(e) => {
-                                tx.send(AppEvent::WebSocketFailed(anyhow!(
-                                    "Websocket connection failed: {e}"
-                                )))
-                                .await
-                                .ok();
-                                return;
+                        let ws_init = async {
+                            let ws_stream = match connect_async("ws://127.0.0.1:3000/ws").await {
+                                Ok((stream, _)) => stream,
+                                Err(e) => {
+                                    return Err(e.to_string());
+                                }
+                            };
+
+                            let (sender, receiver) = ws_stream.split();
+                            Ok((sender, receiver))
+                        };
+
+                        let iroh_init = async {
+                            match IrohNode::new().await {
+                                Ok(iroh_node) => Ok(iroh_node),
+                                Err(e) => Err(e.to_string()),
                             }
                         };
 
-                        let (mut sender, mut receiver) = ws_stream.split();
-
                         tokio::spawn(async move {
-                            if let Some(Ok(msg)) = receiver.next().await {
-                                if process_message(msg).is_break() {
-                                    tx.send(AppEvent::WebSocketSuccess).await.ok();
+                            match tokio::try_join!(ws_init, iroh_init) {
+                                Ok(((mut sender, mut receiver), iroh_node)) => {
+                                    // get ws msg
+                                    let tx_clone = tx.clone();
+                                    tokio::spawn(async move {
+                                        loop {
+                                            if let Some(Ok(msg)) = receiver.next().await {
+                                                if process_message(msg, tx_clone.clone())
+                                                    .await
+                                                    .is_break()
+                                                {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                    // send ws msg
+                                    tokio::spawn(async move {
+                                        loop {
+                                            while let Ok(msg) = from_ui.try_recv() {
+                                                sender
+                                                    .send(Message::Text(Utf8Bytes::from(msg)))
+                                                    .await
+                                                    .ok();
+                                            }
+                                        }
+                                    });
+
+                                    tx.send(AppEvent::ReadyToPublishUser).await.ok();
+                                }
+                                Err(e) => {
+                                    tx.send(AppEvent::FatalError(e)).await.ok();
                                 }
                             }
                         });
@@ -136,6 +183,16 @@ impl eframe::App for MyApp {
                         })
                     });
                 }
+                AppState::PublishUser => {
+                    let json = json!(WebSocketMessage::Register {
+                        nickname: self.nickname.clone()
+                    })
+                    .to_string();
+                    self.to_ws.try_send(json).ok();
+
+                    self.app_state = AppState::WaitForRegisterConfirmation;
+                }
+                AppState::WaitForRegisterConfirmation => {}
                 AppState::Ready => {
                     if ui.button("Select file").clicked() {
                         let files = FileDialog::new().set_directory("/").pick_file().unwrap();
@@ -146,11 +203,14 @@ impl eframe::App for MyApp {
                         self.files.iter().for_each(|p| {
                             ui.horizontal(|ui| {
                                 ui.label(p.file_name().unwrap().to_string_lossy());
-                                ui.button("Send to");
+                                if ui.button("Send to").clicked() {
+                                    self.to_ws.try_send("Bitch".into()).ok();
+                                }
                             });
                         })
                     }
                 }
+                _ => {}
             }
 
             self.toasts.show(ctx);
@@ -158,13 +218,23 @@ impl eframe::App for MyApp {
     }
 }
 
-fn process_message(msg: Message) -> ControlFlow<(), ()> {
+async fn process_message(msg: Message, tx: Sender<AppEvent>) -> ControlFlow<(), ()> {
     match msg {
-        Message::Ping(_) => ControlFlow::Break(()),
-        Message::Text(b) => {
-            println!("{}", b.as_str());
-            ControlFlow::Continue(())
-        }
-        _ => ControlFlow::Continue(()),
+        Message::Text(bytes) => match serde_json::from_str::<WebSocketMessage>(bytes.as_str()) {
+            Ok(websocket_msg) => match websocket_msg {
+                WebSocketMessage::RegisterSuccess => {
+                    tx.send(AppEvent::RegisterSuccess).await.ok();
+                }
+                WebSocketMessage::ErrorDeserializingJson(e) => {
+                    tx.send(AppEvent::FatalError(e.to_string())).await.ok();
+                }
+                _ => {}
+            },
+            Err(e) => {
+                tx.send(AppEvent::FatalError(e.to_string())).await.ok();
+            }
+        },
+        _ => {}
     }
+    ControlFlow::Continue(())
 }
