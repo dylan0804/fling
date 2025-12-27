@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum WebSocketMessage {
-    Register { nickname: String },
+    Register {
+        nickname: String,
+    },
     DisconnectUser(String),
 
     RegisterSuccess,
@@ -13,8 +15,14 @@ pub enum WebSocketMessage {
     GetActiveUsersList(String),
     ActiveUsersList(Vec<String>),
 
-    PrepareFile(PathBuf),
-    SendFile { recipient: String, ticket: String },
+    PrepareFile {
+        recipient: String,
+        abs_path: PathBuf,
+    },
+    SendFile {
+        recipient: String,
+        ticket: String,
+    },
     ReceiveFile(String),
 
     ErrorDeserializingJson(String),

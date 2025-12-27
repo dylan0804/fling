@@ -159,7 +159,10 @@ impl eframe::App for MyApp {
                                     tokio::spawn(async move {
                                         while let Some(websocket_msg) = from_ui.recv().await {
                                             match websocket_msg {
-                                                WebSocketMessage::PrepareFile(abs_path) => {
+                                                WebSocketMessage::PrepareFile {
+                                                    recipient,
+                                                    abs_path,
+                                                } => {
                                                     let tag = iroh_node
                                                         .store
                                                         .blobs()
@@ -176,8 +179,11 @@ impl eframe::App for MyApp {
                                                     )
                                                     .to_string();
 
-                                                    let json = WebSocketMessage::SendFile(ticket)
-                                                        .to_json();
+                                                    let json = WebSocketMessage::SendFile {
+                                                        recipient,
+                                                        ticket,
+                                                    }
+                                                    .to_json();
 
                                                     if let Err(e) = sender
                                                         .send(Message::Text(json.into()))
@@ -266,34 +272,14 @@ impl eframe::App for MyApp {
                         })
                     }
 
-                    if !self.selected_file.to_string_lossy().to_string().is_empty() {
-                        println!("sending file");
-                        let abs_path = std::path::absolute(&self.selected_file).unwrap();
-
-                        if let Err(e) = self.to_ws.try_send(WebSocketMessage::PrepareFile(abs_path))
-                        {
-                            self.tx
-                                .try_send(AppEvent::FatalError(
-                                    anyhow!(e).context("failed to send websocket msg"),
-                                ))
-                                .ok();
-                        }
-                        self.selected_file = PathBuf::new();
-                    }
-
                     if !self.active_users_list.is_empty() {
                         self.active_users_list.iter().for_each(|u| {
                             if ui.button(u).clicked() {
-                                // get iroh credentials (blob and endpoint)
-                                // send name and iroh credentials through websocket
-                                // websocket finds the name and get the sender for that name
-                                // send the blob and endpoint from the client
-                                // download
-
                                 let abs_path = std::path::absolute(&self.selected_file).unwrap();
-                                if let Err(e) =
-                                    self.to_ws.try_send(WebSocketMessage::PrepareFile(abs_path))
-                                {
+                                if let Err(e) = self.to_ws.try_send(WebSocketMessage::PrepareFile {
+                                    recipient: u.clone(),
+                                    abs_path,
+                                }) {
                                     self.tx
                                         .try_send(AppEvent::FatalError(
                                             anyhow!(e).context("failed to send websocket msg"),
