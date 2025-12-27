@@ -55,6 +55,9 @@ impl WebSocketMessage {
                 })
                 .unwrap()
             }
+            WebSocketMessage::ReceiveFile(ticket) => {
+                serde_json::to_string(&WebSocketMessage::ReceiveFile(ticket.clone())).unwrap()
+            }
             _ => "".into(),
         }
     }
