@@ -1,0 +1,498 @@
+use std::{ops::ControlFlow, path::PathBuf};
+
+use anyhow::{anyhow, Context};
+use eframe::CreationContext;
+use egui::{Align2, Color32, CornerRadius, DroppedFile, Id, LayerId, RichText, Stroke, TextStyle, Vec2};
+use egui_toast::{ToastKind, Toasts};
+use futures_util::{SinkExt, StreamExt};
+use iroh_blobs::ticket::BlobTicket;
+use names::{Generator, Name};
+use rfd::FileDialog;
+use serde_json;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::Message,
+};
+
+use crate::{events::AppEvent, iroh_node::IrohNode, message::WebSocketMessage, state::AppState};
+
+mod events;
+mod iroh_node;
+mod message;
+mod state;
+mod toast;
+
+#[tokio::main]
+async fn main() -> eframe::Result {
+    // env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
+
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_resizable(true)
+            .with_inner_size([400.0, 500.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Mini Dropbox",
+        native_options,
+        Box::new(|cc| Ok(Box::new(MyApp::new(cc)))),
+    )
+}
+
+pub struct MyApp {
+    app_state: AppState,
+    nickname: String,
+    active_users_list: Vec<String>,
+    toasts: Toasts,
+    files: Vec<PathBuf>,
+    dropped_files: Vec<DroppedFile>,
+    selected_file: PathBuf,
+    tx: Sender<AppEvent>,
+    rx: Receiver<AppEvent>,
+    to_ws: Sender<WebSocketMessage>,
+}
+
+impl MyApp {
+    fn new(cc: &CreationContext) -> Self {
+        egui_material_icons::initialize(&cc.egui_ctx);
+        
+        let (tx, rx) = mpsc::channel::<AppEvent>(100);
+        let (to_ws, from_ui) = mpsc::channel::<WebSocketMessage>(100);
+
+        let toasts = Toasts::new()
+            .anchor(Align2::RIGHT_TOP, (-10., 10.))
+            .order(egui::Order::Tooltip);
+
+        Self {
+            app_state: AppState::OnStartup(Some(from_ui)),
+            files: vec![],
+            dropped_files: vec![],
+            selected_file: PathBuf::new(),
+            active_users_list: vec![],
+            nickname: "".into(),
+            to_ws,
+            toasts,
+            rx,
+            tx,
+        }
+    }
+}
+
+impl eframe::App for MyApp {
+    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        let mut style = (*ctx.style()).clone();
+        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+        style.visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
+        style.visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+        style.visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+        style.visuals.widgets.active.corner_radius = CornerRadius::same(8);
+        ctx.set_style(style);
+
+        let accent_color = Color32::from_rgb(79, 140, 255);
+        let bg_dark = Color32::from_rgb(30, 30, 30);
+        let bg_card = Color32::from_rgb(40, 40, 40);
+        let text_dim = Color32::from_rgb(140, 140, 140);
+
+        // top panel
+        egui::TopBottomPanel::top("header")
+            .frame(egui::Frame::new().fill(bg_dark).inner_margin(12.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui_material_icons::icon_text(egui_material_icons::icons::ICON_CIRCLE).color(Color32::from_rgb(80, 200, 120)).size(12.0));
+                    ui.label(RichText::new(&self.nickname).strong().size(14.0));
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(bg_dark).inner_margin(16.0))
+            .show(ctx, |ui| {
+                // event handler
+                while let Ok(app_event) = self.rx.try_recv() {
+                    match app_event {
+                        AppEvent::ReadyToPublishUser => self.app_state = AppState::PublishUser,
+                        AppEvent::AllSystemsGo => self.app_state = AppState::Ready,
+                        AppEvent::RegisterSuccess => {
+                            self.show_toast("Connected!", ToastKind::Success);
+                            self.app_state = AppState::Ready;
+                        }
+                        AppEvent::UpdateActiveUsersList(active_users_list) => {
+                            self.active_users_list = active_users_list;
+                        }
+                        AppEvent::FatalError(e) => {
+                            self.show_toast(format!("{e:#}"), ToastKind::Error);
+                        }
+                    }
+                }
+
+                match &mut self.app_state {
+                    AppState::OnStartup(from_ui) => {
+                        let mut from_ui = from_ui.take().unwrap();
+
+                        // get nickname
+                        let mut generator = Generator::with_naming(Name::Numbered);
+                        self.nickname = generator.next().unwrap_or("Guest".into());
+
+                        // setup ws
+                        let tx = self.tx.clone();
+
+                        tokio::spawn(async move {
+                            let ws_init = async {
+                                let ws_stream = connect_async("wss://rough-waterfall-3088.fly.dev/ws")
+                                    .await
+                                    .context("WebSocket connection failed")?;
+
+                                let (sender, receiver) = ws_stream.0.split();
+                                Ok::<_, anyhow::Error>((sender, receiver))
+                            };
+
+                            let iroh_init = async {
+                                IrohNode::new()
+                                    .await
+                                    .context("Iroh node initialization failed")
+                            };
+
+                            tokio::spawn(async move {
+                                match tokio::try_join!(ws_init, iroh_init) {
+                                    Ok(((mut sender, mut receiver), iroh_node)) => {
+                                        // get ws msg
+                                        let tx_clone = tx.clone();
+                                        tokio::spawn(async move {
+                                            loop {
+                                                if let Some(Ok(msg)) = receiver.next().await {
+                                                    if process_message(msg, tx_clone.clone())
+                                                        .await
+                                                        .is_break()
+                                                    {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                        // send ws msg
+                                        let tx_clone = tx.clone();
+                                        tokio::spawn(async move {
+                                            while let Some(websocket_msg) = from_ui.recv().await {
+                                                match websocket_msg {
+                                                    WebSocketMessage::PrepareFile {
+                                                        recipient,
+                                                        abs_path,
+                                                    } => {
+                                                        let tag = iroh_node
+                                                            .store
+                                                            .blobs()
+                                                            .add_path(abs_path)
+                                                            .await
+                                                            .unwrap();
+
+                                                        let node_id = iroh_node.endpoint.id();
+
+                                                        let ticket = BlobTicket::new(
+                                                            node_id.into(),
+                                                            tag.hash,
+                                                            tag.format,
+                                                        )
+                                                        .to_string();
+
+                                                        let json = WebSocketMessage::SendFile {
+                                                            recipient,
+                                                            ticket,
+                                                        }
+                                                        .to_json();
+
+                                                        if let Err(e) = sender
+                                                            .send(Message::Text(json.into()))
+                                                            .await
+                                                            .context("Websocket send failed")
+                                                        {
+                                                            tx_clone
+                                                                .send(AppEvent::FatalError(e))
+                                                                .await
+                                                                .ok();
+                                                        }
+                                                    }
+                                                    _ => {
+                                                        let json = websocket_msg.to_json();
+                                                        if let Err(e) = sender
+                                                            .send(Message::Text(json.into()))
+                                                            .await
+                                                            .context("Websocket send failed")
+                                                        {
+                                                            tx_clone
+                                                                .send(AppEvent::FatalError(e))
+                                                                .await
+                                                                .ok();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                        tx.send(AppEvent::ReadyToPublishUser).await.ok();
+                                    }
+                                    Err(e) => {
+                                        println!("{e:?}");
+                                        tx.send(AppEvent::FatalError(e)).await.ok();
+                                    }
+                                }
+                            });
+                        });
+
+                        self.app_state = AppState::Connecting;
+                    }
+                    AppState::Connecting => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(ui.available_height() / 3.0);
+                            ui.add(egui::Spinner::new().size(32.0).color(accent_color));
+                            ui.add_space(12.0);
+                            ui.label(RichText::new("Connecting...").color(text_dim).size(14.0));
+                        });
+                    }
+                    AppState::PublishUser => {
+                        if let Err(e) = self.to_ws.try_send(WebSocketMessage::Register {
+                            nickname: self.nickname.clone(),
+                        }) {
+                            self.tx
+                                .try_send(AppEvent::FatalError(
+                                    anyhow!(e).context("Register send failed"),
+                                ))
+                                .ok();
+                        }
+                        self.app_state = AppState::WaitForRegisterConfirmation;
+                    }
+                    AppState::WaitForRegisterConfirmation => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(ui.available_height() / 3.0);
+                            ui.add(egui::Spinner::new().size(32.0).color(accent_color));
+                            ui.add_space(12.0);
+                            ui.label(RichText::new("Registering...").color(text_dim).size(14.0));
+                        });
+                    }
+                    AppState::Ready => {
+                        // file drop zone
+                        egui::Frame::new()
+                            .fill(bg_card)
+                            .corner_radius(12.0)
+                            .stroke(Stroke::new(2.0, Color32::from_rgb(60, 60, 60)))
+                            .inner_margin(24.0)
+                            .show(ui, |ui| {
+                                ui.set_min_height(120.0);
+                                ui.vertical_centered(|ui| {
+                                    if self.files.is_empty() {
+                                        ui.add_space(20.0);
+                                        ui.label(RichText::new("📁").size(32.0));
+                                        ui.add_space(8.0);
+                                        if ui.link(RichText::new("Click to select a file").color(accent_color).size(14.0)).clicked() {
+                                            if let Some(file) = FileDialog::new().set_directory("/").pick_file() {
+                                                self.files.push(file);
+                                            }
+                                        }
+                                        ui.label(RichText::new("or drag and drop").color(text_dim).size(12.0));
+                                    } else {
+                                        // Show selected file
+                                        for file in &self.files {
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new("✓").color(Color32::from_rgb(80, 200, 120)));
+                                                ui.label(RichText::new(file.file_name().unwrap().to_string_lossy()).strong());
+                                            });
+                                        }
+                                        ui.add_space(8.0);
+                                        if ui.link(RichText::new("Change file").color(accent_color).size(12.0)).clicked() {
+                                            if let Some(file) = FileDialog::new().set_directory("/").pick_file() {
+                                                self.files.clear();
+                                                self.files.push(file);
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+
+                        ui.add_space(16.0);
+
+                        // online users section
+                        ui.label(RichText::new("Online").color(text_dim).size(12.0));
+                        ui.add_space(4.0);
+
+                        // fetch users when file is selected
+                        if !self.files.is_empty() && self.active_users_list.is_empty() {
+                            if let Err(e) = self.to_ws.try_send(
+                                WebSocketMessage::GetActiveUsersList(self.nickname.clone()),
+                            ) {
+                                self.tx
+                                    .try_send(AppEvent::FatalError(anyhow!(e).context(
+                                        "Failed to send WebSocket message to pipe",
+                                    )))
+                                    .ok();
+                            }
+                        }
+
+                        if self.active_users_list.is_empty() {
+                            egui::Frame::new()
+                                .fill(bg_card)
+                                .corner_radius(8.0)
+                                .inner_margin(16.0)
+                                .show(ui, |ui| {
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(RichText::new("No one else is online").color(text_dim).size(13.0));
+                                    });
+                                });
+                        } else {
+                            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                                for user in self.active_users_list.clone() {
+                                    egui::Frame::new()
+                                        .fill(bg_card)
+                                        .corner_radius(8.0)
+                                        .inner_margin(12.0)
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new("○").color(text_dim).size(10.0));
+                                                ui.label(RichText::new(&user).size(13.0));
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    let has_file = !self.files.is_empty();
+                                                    let btn = egui::Button::new(
+                                                        RichText::new("Send →")
+                                                            .color(if has_file { Color32::WHITE } else { text_dim })
+                                                            .size(12.0)
+                                                    )
+                                                    .fill(if has_file { accent_color } else { bg_dark })
+                                                    .corner_radius(6.0);
+                                                    
+                                                    if ui.add_enabled(has_file, btn).clicked() {
+                                                        self.selected_file = self.files[0].clone();
+                                                        let abs_path = std::path::absolute(&self.selected_file).unwrap();
+                                                        if let Err(e) = self.to_ws.try_send(WebSocketMessage::PrepareFile {
+                                                            recipient: user.clone(),
+                                                            abs_path,
+                                                        }) {
+                                                            self.tx
+                                                                .try_send(AppEvent::FatalError(
+                                                                    anyhow!(e).context("failed to send websocket msg"),
+                                                                ))
+                                                                .ok();
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                        });
+                                    ui.add_space(4.0);
+                                }
+                            });
+                        }
+
+                        preview_files_being_dropped(ctx);
+                        
+
+                        ctx.input(|i| {
+                            if !i.raw.dropped_files.is_empty() {
+                                self.dropped_files.clone_from(&i.raw.dropped_files);
+                                println!("dropped files {:?}", self.dropped_files);
+                            }
+                        });
+                    }
+                    _ => {}
+                }
+
+                self.toasts.show(ctx);
+            });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Err(e) = self
+            .to_ws
+            .try_send(WebSocketMessage::DisconnectUser(self.nickname.clone()))
+        {
+            self.tx
+                .try_send(AppEvent::FatalError(
+                    anyhow!(e).context("Disconnect send failed"),
+                ))
+                .ok();
+        }
+    }
+}
+
+async fn process_message(msg: Message, tx: Sender<AppEvent>) -> ControlFlow<(), ()> {
+    match msg {
+        Message::Text(bytes) => match serde_json::from_str::<WebSocketMessage>(bytes.as_str()) {
+            Ok(websocket_msg) => match websocket_msg {
+                WebSocketMessage::RegisterSuccess => {
+                    tx.send(AppEvent::RegisterSuccess).await.ok();
+                }
+                WebSocketMessage::ErrorDeserializingJson(e) => {
+                    tx.send(AppEvent::FatalError(
+                        anyhow!(e).context("Server JSON error"),
+                    ))
+                    .await
+                    .ok();
+                }
+                WebSocketMessage::ActiveUsersList(active_users_list) => {
+                    tx.send(AppEvent::UpdateActiveUsersList(active_users_list))
+                        .await
+                        .ok();
+                }
+                WebSocketMessage::ReceiveFile(ticket) => {
+                    println!("ticket is {ticket}");
+                }
+                _ => {}
+            },
+            Err(e) => {
+                tx.send(AppEvent::FatalError(
+                    anyhow!(e).context("Message parse failed"),
+                ))
+                .await
+                .ok();
+            }
+        },
+        _ => {}
+    }
+
+    ControlFlow::Continue(())
+}
+
+fn preview_files_being_dropped(ctx: &egui::Context) {
+    use std::fmt::Write as _;
+
+    if !ctx.input(|i| i.raw.hovered_files.is_empty()) {
+        let text = ctx.input(|i| {
+            let mut text = String::new();
+            for file in &i.raw.hovered_files {
+                if let Some(path) = &file.path {
+                    if let Some(name) = path.file_name() {
+                        write!(text, "{}\n", name.to_string_lossy().to_string()).ok();
+                    }
+                }
+            }
+            text
+        });
+
+        let painter = ctx.layer_painter(LayerId::new(egui::Order::Foreground, Id::new("file_drop_overlay")));
+        let screen_rect = ctx.viewport_rect();
+        
+        painter.rect_filled(screen_rect, 0.0, Color32::from_rgba_unmultiplied(30, 30, 30, 230));
+        
+        let accent_color = Color32::from_rgb(79, 140, 255);
+        let center = screen_rect.center();
+        
+        let inner_rect = screen_rect.shrink(24.0);
+        painter.rect_stroke(inner_rect, 12.0, Stroke::new(2.0, accent_color), egui::StrokeKind::Inside);
+        
+        let icon_pos = center - egui::vec2(0.0, 30.0);
+        painter.text(
+            icon_pos,
+            Align2::CENTER_CENTER,
+            "📁",
+            egui::FontId::proportional(48.0),
+            Color32::WHITE,
+        );
+        
+        let text_pos = center + egui::vec2(0.0, 30.0);
+        painter.text(
+            text_pos,
+            Align2::CENTER_CENTER,
+            if text.is_empty() { "Drop file here".to_string() } else { text },
+            egui::FontId::proportional(16.0),
+            Color32::WHITE,
+        );
+    }
+}
