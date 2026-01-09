@@ -144,7 +144,7 @@ impl eframe::App for MyApp {
 
                         tokio::spawn(async move {
                             let ws_init = async {
-                                let ws_stream = connect_async("ws://127.0.0.1:3000/ws")
+                                let ws_stream = connect_async("wss://rough-waterfall-3088.fly.dev/ws")
                                     .await
                                     .context("WebSocket connection failed")?;
 
