@@ -1,14 +1,15 @@
-use std::{ops::ControlFlow, path::PathBuf};
+use std::{fmt::format, ops::ControlFlow, path::PathBuf, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use eframe::CreationContext;
 use egui::{Align2, Color32, CornerRadius, DroppedFile, Id, LayerId, RichText, Stroke, TextStyle, Vec2};
 use egui_toast::{ToastKind, Toasts};
 use futures_util::{SinkExt, StreamExt};
-use iroh_blobs::ticket::BlobTicket;
+use iroh::protocol::Router;
+use iroh_blobs::{api::downloader, ticket::BlobTicket};
 use names::{Generator, Name};
 use rfd::FileDialog;
-use serde_json;
+use serde_json::{self, to_string};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_tungstenite::{
     connect_async,
@@ -123,6 +124,10 @@ impl eframe::App for MyApp {
                         AppEvent::FatalError(e) => {
                             self.show_toast(format!("{e:#}"), ToastKind::Error);
                         }
+                        AppEvent::DownloadFile { ticket, file_name} => {
+                            self.to_ws.try_send(WebSocketMessage::DownloadFile { ticket, file_name }).ok();
+                        }
+                        _ => {}
                     }
                 }
 
@@ -139,7 +144,7 @@ impl eframe::App for MyApp {
 
                         tokio::spawn(async move {
                             let ws_init = async {
-                                let ws_stream = connect_async("wss://rough-waterfall-3088.fly.dev/ws")
+                                let ws_stream = connect_async("ws://127.0.0.1:3000/ws")
                                     .await
                                     .context("WebSocket connection failed")?;
 
@@ -148,14 +153,20 @@ impl eframe::App for MyApp {
                             };
 
                             let iroh_init = async {
-                                IrohNode::new()
+                                let iroh_node = IrohNode::new()
                                     .await
-                                    .context("Iroh node initialization failed")
+                                    .context("Iroh node initialization failed").unwrap();
+
+                                let router = Router::builder(iroh_node.endpoint.clone())
+                                    .accept(iroh_blobs::ALPN, iroh_node.blobs.clone())
+                                    .spawn();
+
+                                Ok((iroh_node, router))
                             };
 
                             tokio::spawn(async move {
                                 match tokio::try_join!(ws_init, iroh_init) {
-                                    Ok(((mut sender, mut receiver), iroh_node)) => {
+                                    Ok(((mut sender, mut receiver), (iroh_node, router))) => {
                                         // get ws msg
                                         let tx_clone = tx.clone();
                                         tokio::spawn(async move {
@@ -179,6 +190,7 @@ impl eframe::App for MyApp {
                                                     WebSocketMessage::PrepareFile {
                                                         recipient,
                                                         abs_path,
+                                                        file_name
                                                     } => {
                                                         let tag = iroh_node
                                                             .store
@@ -187,10 +199,10 @@ impl eframe::App for MyApp {
                                                             .await
                                                             .unwrap();
 
-                                                        let node_id = iroh_node.endpoint.id();
+                                                        let node_id = iroh_node.endpoint.addr();
 
                                                         let ticket = BlobTicket::new(
-                                                            node_id.into(),
+                                                            node_id,
                                                             tag.hash,
                                                             tag.format,
                                                         )
@@ -199,6 +211,7 @@ impl eframe::App for MyApp {
                                                         let json = WebSocketMessage::SendFile {
                                                             recipient,
                                                             ticket,
+                                                            file_name  
                                                         }
                                                         .to_json();
 
@@ -212,6 +225,21 @@ impl eframe::App for MyApp {
                                                                 .await
                                                                 .ok();
                                                         }
+                                                    }
+                                                    WebSocketMessage::DownloadFile { ticket, file_name } => {
+                                                        let downloader = iroh_node.store.downloader(&iroh_node.endpoint);
+                                                        match downloader.download(ticket.hash(), Some(ticket.addr().id)).await {
+                                                            Ok(_) =>  {
+                                                                println!("Downloading...");
+                                                                let mut downloads_dir = dirs::download_dir().unwrap_or_default();
+                                                                downloads_dir = downloads_dir.join(file_name);
+                                                                iroh_node.store.blobs().export(ticket.hash(), downloads_dir).await.unwrap();
+                                                                println!("Finished copying");
+                                                            } ,
+                                                            Err(e ) => println!("Download failed {:?}", e)
+                                                        }
+
+                                                        let _ = &router;
                                                     }
                                                     _ => {
                                                         let json = websocket_msg.to_json();
@@ -291,7 +319,6 @@ impl eframe::App for MyApp {
                                         }
                                         ui.label(RichText::new("or drag and drop").color(text_dim).size(12.0));
                                     } else {
-                                        // Show selected file
                                         for file in &self.files {
                                             ui.horizontal(|ui| {
                                                 ui.label(RichText::new("✓").color(Color32::from_rgb(80, 200, 120)));
@@ -362,9 +389,14 @@ impl eframe::App for MyApp {
                                                     if ui.add_enabled(has_file, btn).clicked() {
                                                         self.selected_file = self.files[0].clone();
                                                         let abs_path = std::path::absolute(&self.selected_file).unwrap();
+                                                        let file_name = abs_path.file_name()
+                                                            .and_then(|a| a.to_str())
+                                                            .unwrap_or_default()
+                                                            .to_string();
                                                         if let Err(e) = self.to_ws.try_send(WebSocketMessage::PrepareFile {
-                                                            recipient: user.clone(),
+                                                            recipient: user,
                                                             abs_path,
+                                                            file_name
                                                         }) {
                                                             self.tx
                                                                 .try_send(AppEvent::FatalError(
@@ -387,7 +419,6 @@ impl eframe::App for MyApp {
                         ctx.input(|i| {
                             if !i.raw.dropped_files.is_empty() {
                                 self.dropped_files.clone_from(&i.raw.dropped_files);
-                                println!("dropped files {:?}", self.dropped_files);
                             }
                         });
                     }
@@ -431,8 +462,10 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>) -> ControlFlow<(), 
                         .await
                         .ok();
                 }
-                WebSocketMessage::ReceiveFile(ticket) => {
-                    println!("ticket is {ticket}");
+                WebSocketMessage::ReceiveFile { file_name, ticket} => {
+                    println!("got {file_name} with {ticket}");
+                    let ticket = BlobTicket::from_str(&ticket).unwrap();
+                    tx.send(AppEvent::DownloadFile { ticket, file_name }).await.ok();
                 }
                 _ => {}
             },

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use iroh::Endpoint;
+use iroh::{Endpoint, SecretKey};
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 
 pub struct IrohNode {
@@ -10,7 +10,11 @@ pub struct IrohNode {
 
 impl IrohNode {
     pub async fn new() -> Result<Self> {
-        let endpoint = Endpoint::bind().await?;
+        let mut builder = Endpoint::builder();
+        let secret_key = SecretKey::generate(&mut rand::rng());
+        builder = builder.secret_key(secret_key);
+
+        let endpoint = builder.bind().await?;
         let store = MemStore::new();
         let blobs = BlobsProtocol::new(&store, None);
 

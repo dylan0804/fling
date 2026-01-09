@@ -21,3 +21,5 @@ serde = { version = "1.0.228", features = ["derive"] }
 egui-toast = "0.19.1"
 iroh = "0.95.1"
 iroh-blobs = "0.97.0"
+rand = "0.9.2"
+dirs = "6.0.0"

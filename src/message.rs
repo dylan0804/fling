@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use iroh_blobs::ticket::BlobTicket;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -18,45 +19,53 @@ pub enum WebSocketMessage {
     PrepareFile {
         recipient: String,
         abs_path: PathBuf,
+        file_name: String,
     },
     SendFile {
         recipient: String,
         ticket: String,
+        file_name: String,
     },
-    ReceiveFile(String),
+    ReceiveFile {
+        ticket: String,
+        file_name: String,
+    },
+    DownloadFile {
+        ticket: BlobTicket,
+        file_name: String,
+    },
 
     ErrorDeserializingJson(String),
     UserNotFound,
 }
 
 impl WebSocketMessage {
-    pub fn to_json(&self) -> String {
+    pub fn to_json(self) -> String {
         match self {
             WebSocketMessage::Register { nickname } => {
-                serde_json::to_string(&WebSocketMessage::Register {
-                    nickname: nickname.clone(),
-                })
-                .unwrap()
+                serde_json::to_string(&WebSocketMessage::Register { nickname }).unwrap()
             }
             WebSocketMessage::DisconnectUser(nickname) => {
-                serde_json::to_string(&WebSocketMessage::DisconnectUser(nickname.clone())).unwrap()
+                serde_json::to_string(&WebSocketMessage::DisconnectUser(nickname)).unwrap()
             }
             WebSocketMessage::RegisterSuccess => {
                 serde_json::to_string(&WebSocketMessage::RegisterSuccess).unwrap()
             }
             WebSocketMessage::GetActiveUsersList(except) => {
-                serde_json::to_string(&WebSocketMessage::GetActiveUsersList(except.clone()))
-                    .unwrap()
+                serde_json::to_string(&WebSocketMessage::GetActiveUsersList(except)).unwrap()
             }
-            WebSocketMessage::SendFile { recipient, ticket } => {
-                serde_json::to_string(&WebSocketMessage::SendFile {
-                    recipient: recipient.clone(),
-                    ticket: ticket.clone(),
-                })
-                .unwrap()
-            }
-            WebSocketMessage::ReceiveFile(ticket) => {
-                serde_json::to_string(&WebSocketMessage::ReceiveFile(ticket.clone())).unwrap()
+            WebSocketMessage::SendFile {
+                recipient,
+                ticket,
+                file_name,
+            } => serde_json::to_string(&WebSocketMessage::SendFile {
+                recipient,
+                ticket,
+                file_name,
+            })
+            .unwrap(),
+            WebSocketMessage::ReceiveFile { file_name, ticket } => {
+                serde_json::to_string(&WebSocketMessage::ReceiveFile { file_name, ticket }).unwrap()
             }
             _ => "".into(),
         }
