@@ -133,7 +133,7 @@ impl eframe::App for MyApp {
 
                 match &mut self.app_state {
                     AppState::OnStartup(from_ui) => {
-                        let mut from_ui = from_ui.take().unwrap();
+                        let mut from_ui = from_ui.take().expect("from_ui channel error, shouldn't happen tho");
 
                         // get nickname
                         let mut generator = Generator::with_naming(Name::Numbered);
@@ -155,7 +155,7 @@ impl eframe::App for MyApp {
                             let iroh_init = async {
                                 let iroh_node = IrohNode::new()
                                     .await
-                                    .context("Iroh node initialization failed").unwrap();
+                                    .context("Iroh node initialization failed")?;
 
                                 let router = Router::builder(iroh_node.endpoint.clone())
                                     .accept(iroh_blobs::ALPN, iroh_node.blobs.clone())
@@ -230,11 +230,12 @@ impl eframe::App for MyApp {
                                                         let downloader = iroh_node.store.downloader(&iroh_node.endpoint);
                                                         match downloader.download(ticket.hash(), Some(ticket.addr().id)).await {
                                                             Ok(_) =>  {
-                                                                println!("Downloading...");
                                                                 let mut downloads_dir = dirs::download_dir().unwrap_or_default();
                                                                 downloads_dir = downloads_dir.join(file_name);
-                                                                iroh_node.store.blobs().export(ticket.hash(), downloads_dir).await.unwrap();
-                                                                println!("Finished copying");
+
+                                                                if let Err(e) = iroh_node.store.blobs().export(ticket.hash(), downloads_dir).await {
+                                                                   tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Failed to save file to Downloads"))).await.ok(); 
+                                                                }
                                                             } ,
                                                             Err(e ) => println!("Download failed {:?}", e)
                                                         }
@@ -463,8 +464,14 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>) -> ControlFlow<(), 
                         .ok();
                 }
                 WebSocketMessage::ReceiveFile { file_name, ticket} => {
-                    println!("got {file_name} with {ticket}");
-                    let ticket = BlobTicket::from_str(&ticket).unwrap();
+                    let ticket = match BlobTicket::from_str(&ticket) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tx.send(AppEvent::FatalError(anyhow!(e).context("Error parsing ticket to BlobTicket"))).await.ok();
+                            return ControlFlow::Continue(());
+                        }
+                    };
+
                     tx.send(AppEvent::DownloadFile { ticket, file_name }).await.ok();
                 }
                 _ => {}
