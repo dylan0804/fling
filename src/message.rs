@@ -40,34 +40,7 @@ pub enum WebSocketMessage {
 }
 
 impl WebSocketMessage {
-    pub fn to_json(self) -> String {
-        match self {
-            WebSocketMessage::Register { nickname } => {
-                serde_json::to_string(&WebSocketMessage::Register { nickname }).unwrap()
-            }
-            WebSocketMessage::DisconnectUser(nickname) => {
-                serde_json::to_string(&WebSocketMessage::DisconnectUser(nickname)).unwrap()
-            }
-            WebSocketMessage::RegisterSuccess => {
-                serde_json::to_string(&WebSocketMessage::RegisterSuccess).unwrap()
-            }
-            WebSocketMessage::GetActiveUsersList(except) => {
-                serde_json::to_string(&WebSocketMessage::GetActiveUsersList(except)).unwrap()
-            }
-            WebSocketMessage::SendFile {
-                recipient,
-                ticket,
-                file_name,
-            } => serde_json::to_string(&WebSocketMessage::SendFile {
-                recipient,
-                ticket,
-                file_name,
-            })
-            .unwrap(),
-            WebSocketMessage::ReceiveFile { file_name, ticket } => {
-                serde_json::to_string(&WebSocketMessage::ReceiveFile { file_name, ticket }).unwrap()
-            }
-            _ => "".into(),
-        }
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(&self).expect("error serializing json BUG!")
     }
 }

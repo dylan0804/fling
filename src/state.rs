@@ -8,9 +8,6 @@ pub enum AppState {
     Connecting,
     Ready,
 
-    WebSocketReady,
-    IrohReady,
-
     PublishUser,
     WaitForRegisterConfirmation,
 }

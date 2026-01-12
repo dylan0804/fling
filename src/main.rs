@@ -1,20 +1,17 @@
-use std::{fmt::format, ops::ControlFlow, path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use eframe::CreationContext;
-use egui::{Align2, Color32, CornerRadius, DroppedFile, Id, LayerId, RichText, Stroke, TextStyle, Vec2};
+use egui::{Align2, Color32, CornerRadius, DroppedFile, Id, LayerId, RichText, Stroke, Vec2};
 use egui_toast::{ToastKind, Toasts};
 use futures_util::{SinkExt, StreamExt};
 use iroh::protocol::Router;
-use iroh_blobs::{api::downloader, ticket::BlobTicket};
+use iroh_blobs::ticket::BlobTicket;
 use names::{Generator, Name};
 use rfd::FileDialog;
-use serde_json::{self, to_string};
+use serde_json::{self};
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::Message,
-};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::{events::AppEvent, iroh_node::IrohNode, message::WebSocketMessage, state::AppState};
 
@@ -23,6 +20,8 @@ mod iroh_node;
 mod message;
 mod state;
 mod toast;
+
+const WS_URL: &'static str = "wss://rough-waterfall-3088.fly.dev/ws";
 
 #[tokio::main]
 async fn main() -> eframe::Result {
@@ -53,12 +52,13 @@ pub struct MyApp {
     tx: Sender<AppEvent>,
     rx: Receiver<AppEvent>,
     to_ws: Sender<WebSocketMessage>,
+    download_dir: PathBuf,
 }
 
 impl MyApp {
     fn new(cc: &CreationContext) -> Self {
         egui_material_icons::initialize(&cc.egui_ctx);
-        
+
         let (tx, rx) = mpsc::channel::<AppEvent>(100);
         let (to_ws, from_ui) = mpsc::channel::<WebSocketMessage>(100);
 
@@ -72,7 +72,8 @@ impl MyApp {
             dropped_files: vec![],
             selected_file: PathBuf::new(),
             active_users_list: vec![],
-            nickname: "".into(),
+            nickname: String::new(),
+            download_dir: PathBuf::new(),
             to_ws,
             toasts,
             rx,
@@ -101,7 +102,11 @@ impl eframe::App for MyApp {
             .frame(egui::Frame::new().fill(bg_dark).inner_margin(12.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui_material_icons::icon_text(egui_material_icons::icons::ICON_CIRCLE).color(Color32::from_rgb(80, 200, 120)).size(12.0));
+                    ui.label(
+                        egui_material_icons::icon_text(egui_material_icons::icons::ICON_CIRCLE)
+                            .color(Color32::from_rgb(80, 200, 120))
+                            .size(12.0),
+                    );
                     ui.label(RichText::new(&self.nickname).strong().size(14.0));
                 });
             });
@@ -113,7 +118,6 @@ impl eframe::App for MyApp {
                 while let Ok(app_event) = self.rx.try_recv() {
                     match app_event {
                         AppEvent::ReadyToPublishUser => self.app_state = AppState::PublishUser,
-                        AppEvent::AllSystemsGo => self.app_state = AppState::Ready,
                         AppEvent::RegisterSuccess => {
                             self.show_toast("Connected!", ToastKind::Success);
                             self.app_state = AppState::Ready;
@@ -127,24 +131,26 @@ impl eframe::App for MyApp {
                         AppEvent::DownloadFile { ticket, file_name} => {
                             self.to_ws.try_send(WebSocketMessage::DownloadFile { ticket, file_name }).ok();
                         }
-                        _ => {}
                     }
                 }
 
                 match &mut self.app_state {
                     AppState::OnStartup(from_ui) => {
-                        let mut from_ui = from_ui.take().expect("from_ui channel error, shouldn't happen tho");
+                        let mut ws_receiver = from_ui.take().expect("from_ui already taken");
 
-                        // get nickname
+                        self.download_dir = dirs::download_dir().unwrap_or_else(|| {
+                            self.tx.try_send(AppEvent::FatalError(anyhow!("Failed getting download dir, using \".\" instead"))).ok();
+                            PathBuf::from(".")
+                        });
+
                         let mut generator = Generator::with_naming(Name::Numbered);
                         self.nickname = generator.next().unwrap_or("Guest".into());
 
-                        // setup ws
                         let tx = self.tx.clone();
-
+                        let download_dir = self.download_dir.clone();
                         tokio::spawn(async move {
                             let ws_init = async {
-                                let ws_stream = connect_async("wss://rough-waterfall-3088.fly.dev/ws")
+                                let ws_stream = connect_async(WS_URL)
                                     .await
                                     .context("WebSocket connection failed")?;
 
@@ -164,6 +170,7 @@ impl eframe::App for MyApp {
                                 Ok((iroh_node, router))
                             };
 
+                            let download_dir = download_dir.clone(); 
                             tokio::spawn(async move {
                                 match tokio::try_join!(ws_init, iroh_init) {
                                     Ok(((mut sender, mut receiver), (iroh_node, router))) => {
@@ -171,11 +178,14 @@ impl eframe::App for MyApp {
                                         let tx_clone = tx.clone();
                                         tokio::spawn(async move {
                                             loop {
-                                                if let Some(Ok(msg)) = receiver.next().await {
-                                                    if process_message(msg, tx_clone.clone())
-                                                        .await
-                                                        .is_break()
-                                                    {
+                                                match receiver.next().await {
+                                                    Some(Ok(msg)) => process_message(msg, tx_clone.clone()).await,
+                                                    Some(Err(e)) => {
+                                                        tx_clone.send(AppEvent::FatalError(anyhow!(e).context("WebSocket error"))).await.ok();
+                                                        break;
+                                                    }
+                                                    None => {
+                                                        tx_clone.send(AppEvent::FatalError(anyhow!("WebSocket disconnected"))).await.ok();
                                                         break;
                                                     }
                                                 }
@@ -184,20 +194,26 @@ impl eframe::App for MyApp {
 
                                         // send ws msg
                                         let tx_clone = tx.clone();
+                                        let download_dir = download_dir.clone();
                                         tokio::spawn(async move {
-                                            while let Some(websocket_msg) = from_ui.recv().await {
+                                            while let Some(websocket_msg) = ws_receiver.recv().await {
                                                 match websocket_msg {
                                                     WebSocketMessage::PrepareFile {
                                                         recipient,
                                                         abs_path,
                                                         file_name
                                                     } => {
-                                                        let tag = iroh_node
+                                                        let tag = match iroh_node
                                                             .store
                                                             .blobs()
                                                             .add_path(abs_path)
-                                                            .await
-                                                            .unwrap();
+                                                            .await {
+                                                                Ok(a) => a,
+                                                                Err(e) => {
+                                                                    tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Error getting TagInfo"))).await.ok();
+                                                                    continue;
+                                                                }
+                                                        };
 
                                                         let node_id = iroh_node.endpoint.addr();
 
@@ -208,12 +224,7 @@ impl eframe::App for MyApp {
                                                         )
                                                         .to_string();
 
-                                                        let json = WebSocketMessage::SendFile {
-                                                            recipient,
-                                                            ticket,
-                                                            file_name  
-                                                        }
-                                                        .to_json();
+                                                        let json = WebSocketMessage::SendFile { recipient, ticket, file_name }.to_json();
 
                                                         if let Err(e) = sender
                                                             .send(Message::Text(json.into()))
@@ -230,14 +241,16 @@ impl eframe::App for MyApp {
                                                         let downloader = iroh_node.store.downloader(&iroh_node.endpoint);
                                                         match downloader.download(ticket.hash(), Some(ticket.addr().id)).await {
                                                             Ok(_) =>  {
-                                                                let mut downloads_dir = dirs::download_dir().unwrap_or_default();
-                                                                downloads_dir = downloads_dir.join(file_name);
+                                                                let mut download_dir = download_dir.clone();
+                                                                download_dir = download_dir.join(file_name);
 
-                                                                if let Err(e) = iroh_node.store.blobs().export(ticket.hash(), downloads_dir).await {
-                                                                   tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Failed to save file to Downloads"))).await.ok(); 
+                                                                if let Err(e) = iroh_node.store.blobs().export(ticket.hash(), download_dir).await {
+                                                                   tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Failed to save file to Downloads"))).await.ok();
                                                                 }
-                                                            } ,
-                                                            Err(e ) => println!("Download failed {:?}", e)
+                                                            }
+                                                            Err(e ) => {
+                                                                tx_clone.send(AppEvent::FatalError(e.context("Download failed"))).await.ok();
+                                                            }
                                                         }
 
                                                         let _ = &router;
@@ -262,8 +275,8 @@ impl eframe::App for MyApp {
                                         tx.send(AppEvent::ReadyToPublishUser).await.ok();
                                     }
                                     Err(e) => {
-                                        println!("{e:?}");
-                                        tx.send(AppEvent::FatalError(e)).await.ok();
+                                        let context = format!("Join handle error {:?}", e);
+                                        tx.send(AppEvent::FatalError(e.context(context))).await.ok();
                                     }
                                 }
                             });
@@ -323,7 +336,7 @@ impl eframe::App for MyApp {
                                         for file in &self.files {
                                             ui.horizontal(|ui| {
                                                 ui.label(RichText::new("✓").color(Color32::from_rgb(80, 200, 120)));
-                                                ui.label(RichText::new(file.file_name().unwrap().to_string_lossy()).strong());
+                                                ui.label(RichText::new(file.file_name().unwrap_or_default().to_string_lossy()).strong());
                                             });
                                         }
                                         ui.add_space(8.0);
@@ -368,7 +381,7 @@ impl eframe::App for MyApp {
                                 });
                         } else {
                             egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                                for user in self.active_users_list.clone() {
+                                for user in &self.active_users_list {
                                     egui::Frame::new()
                                         .fill(bg_card)
                                         .corner_radius(8.0)
@@ -376,7 +389,7 @@ impl eframe::App for MyApp {
                                         .show(ui, |ui| {
                                             ui.horizontal(|ui| {
                                                 ui.label(RichText::new("○").color(text_dim).size(10.0));
-                                                ui.label(RichText::new(&user).size(13.0));
+                                                ui.label(RichText::new(user).size(13.0));
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     let has_file = !self.files.is_empty();
                                                     let btn = egui::Button::new(
@@ -384,18 +397,21 @@ impl eframe::App for MyApp {
                                                             .color(if has_file { Color32::WHITE } else { text_dim })
                                                             .size(12.0)
                                                     )
-                                                    .fill(if has_file { accent_color } else { bg_dark })
-                                                    .corner_radius(6.0);
-                                                    
+                                                        .fill(if has_file { accent_color } else { bg_dark })
+                                                        .corner_radius(6.0);
                                                     if ui.add_enabled(has_file, btn).clicked() {
                                                         self.selected_file = self.files[0].clone();
-                                                        let abs_path = std::path::absolute(&self.selected_file).unwrap();
+                                                        let Ok(abs_path) = std::path::absolute(&self.selected_file) else {
+                                                            self.tx.try_send(AppEvent::FatalError(anyhow!("Invalid path"))).ok();
+                                                            return;
+                                                        };
                                                         let file_name = abs_path.file_name()
                                                             .and_then(|a| a.to_str())
                                                             .unwrap_or_default()
                                                             .to_string();
+
                                                         if let Err(e) = self.to_ws.try_send(WebSocketMessage::PrepareFile {
-                                                            recipient: user,
+                                                            recipient: user.clone(),
                                                             abs_path,
                                                             file_name
                                                         }) {
@@ -415,7 +431,6 @@ impl eframe::App for MyApp {
                         }
 
                         preview_files_being_dropped(ctx);
-                        
 
                         ctx.input(|i| {
                             if !i.raw.dropped_files.is_empty() {
@@ -423,7 +438,6 @@ impl eframe::App for MyApp {
                             }
                         });
                     }
-                    _ => {}
                 }
 
                 self.toasts.show(ctx);
@@ -444,9 +458,9 @@ impl eframe::App for MyApp {
     }
 }
 
-async fn process_message(msg: Message, tx: Sender<AppEvent>) -> ControlFlow<(), ()> {
-    match msg {
-        Message::Text(bytes) => match serde_json::from_str::<WebSocketMessage>(bytes.as_str()) {
+async fn process_message(msg: Message, tx: Sender<AppEvent>) {
+    if let Message::Text(bytes) = msg {
+        match serde_json::from_str::<WebSocketMessage>(bytes.as_str()) {
             Ok(websocket_msg) => match websocket_msg {
                 WebSocketMessage::RegisterSuccess => {
                     tx.send(AppEvent::RegisterSuccess).await.ok();
@@ -463,16 +477,22 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>) -> ControlFlow<(), 
                         .await
                         .ok();
                 }
-                WebSocketMessage::ReceiveFile { file_name, ticket} => {
+                WebSocketMessage::ReceiveFile { file_name, ticket } => {
                     let ticket = match BlobTicket::from_str(&ticket) {
                         Ok(t) => t,
                         Err(e) => {
-                            tx.send(AppEvent::FatalError(anyhow!(e).context("Error parsing ticket to BlobTicket"))).await.ok();
-                            return ControlFlow::Continue(());
+                            tx.send(AppEvent::FatalError(
+                                anyhow!(e).context("Error parsing ticket to BlobTicket"),
+                            ))
+                                .await
+                                .ok();
+                            return;
                         }
                     };
 
-                    tx.send(AppEvent::DownloadFile { ticket, file_name }).await.ok();
+                    tx.send(AppEvent::DownloadFile { ticket, file_name })
+                        .await
+                        .ok();
                 }
                 _ => {}
             },
@@ -483,11 +503,8 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>) -> ControlFlow<(), 
                 .await
                 .ok();
             }
-        },
-        _ => {}
+        }
     }
-
-    ControlFlow::Continue(())
 }
 
 fn preview_files_being_dropped(ctx: &egui::Context) {
@@ -497,26 +514,36 @@ fn preview_files_being_dropped(ctx: &egui::Context) {
         let text = ctx.input(|i| {
             let mut text = String::new();
             for file in &i.raw.hovered_files {
-                if let Some(path) = &file.path {
-                    if let Some(name) = path.file_name() {
-                        write!(text, "{}\n", name.to_string_lossy().to_string()).ok();
-                    }
+                if let Some(path) = &file.path && let Some(name) = path.file_name() {
+                    write!(text, "{}\n", name.to_string_lossy()).ok();
                 }
             }
             text
         });
 
-        let painter = ctx.layer_painter(LayerId::new(egui::Order::Foreground, Id::new("file_drop_overlay")));
+        let painter = ctx.layer_painter(LayerId::new(
+            egui::Order::Foreground,
+            Id::new("file_drop_overlay"),
+        ));
         let screen_rect = ctx.viewport_rect();
-        
-        painter.rect_filled(screen_rect, 0.0, Color32::from_rgba_unmultiplied(30, 30, 30, 230));
-        
+
+        painter.rect_filled(
+            screen_rect,
+            0.0,
+            Color32::from_rgba_unmultiplied(30, 30, 30, 230),
+        );
+
         let accent_color = Color32::from_rgb(79, 140, 255);
         let center = screen_rect.center();
-        
+
         let inner_rect = screen_rect.shrink(24.0);
-        painter.rect_stroke(inner_rect, 12.0, Stroke::new(2.0, accent_color), egui::StrokeKind::Inside);
-        
+        painter.rect_stroke(
+            inner_rect,
+            12.0,
+            Stroke::new(2.0, accent_color),
+            egui::StrokeKind::Inside,
+        );
+
         let icon_pos = center - egui::vec2(0.0, 30.0);
         painter.text(
             icon_pos,
@@ -525,12 +552,16 @@ fn preview_files_being_dropped(ctx: &egui::Context) {
             egui::FontId::proportional(48.0),
             Color32::WHITE,
         );
-        
+
         let text_pos = center + egui::vec2(0.0, 30.0);
         painter.text(
             text_pos,
             Align2::CENTER_CENTER,
-            if text.is_empty() { "Drop file here".to_string() } else { text },
+            if text.is_empty() {
+                "Drop file here".to_string()
+            } else {
+                text
+            },
             egui::FontId::proportional(16.0),
             Color32::WHITE,
         );

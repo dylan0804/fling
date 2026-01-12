@@ -2,7 +2,6 @@ use iroh_blobs::ticket::BlobTicket;
 
 pub enum AppEvent {
     ReadyToPublishUser,
-    AllSystemsGo,
     RegisterSuccess,
 
     UpdateActiveUsersList(Vec<String>),
