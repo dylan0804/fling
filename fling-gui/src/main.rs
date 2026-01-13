@@ -6,7 +6,7 @@ use egui::{Align2, Color32, CornerRadius, DroppedFile, Id, LayerId, RichText, St
 use egui_toast::{ToastKind, Toasts};
 use futures_util::{SinkExt, StreamExt};
 use iroh::{protocol::Router, EndpointAddr};
-use iroh_blobs::{api::{downloader::Shuffled, tags::TagInfo}, ticket::BlobTicket, Hash, HashAndFormat};
+use iroh_blobs::{api::{downloader::Shuffled, tags::TagInfo, Store}, format::collection::Collection, ticket::BlobTicket, Hash, HashAndFormat};
 use message_types::WebSocketMessage;
 use names::{Generator, Name};
 use rfd::FileDialog;
@@ -245,10 +245,21 @@ impl eframe::App for MyApp {
                                                             Ok(_) =>  {
                                                                 let mut download_dir = download_dir.clone();
                                                                 // download_dir = download_dir.join(file_name);
-
-                                                                if let Err(e) = iroh_node.store.blobs().export(ticket.hash(), download_dir).await {
-                                                                   tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Failed to save file to Downloads"))).await.ok();
+                                                                let store: Store = iroh_node.store.clone().into();
+                                                                match Collection::load(ticket.hash(), &store).await {
+                                                                    Ok(c) => {
+                                                                        for (f, h) in c.iter() {
+                                                                            println!("file is {f}");
+                                                                        }
+                                                                    }
+                                                                    Err(e) => {
+                                                                        tx_clone.send(AppEvent::FatalError(e.context("Error loading collection"))).await.ok();
+                                                                    }
                                                                 }
+
+                                                                // if let Err(e) = iroh_node.store.blobs().export(ticket.hash(), download_dir).await {
+                                                                //    tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Failed to save file to Downloads"))).await.ok();
+                                                                // }
                                                             }
                                                             Err(e ) => {
                                                                 tx_clone.send(AppEvent::FatalError(e.context("Download failed"))).await.ok();
