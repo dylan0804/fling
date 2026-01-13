@@ -6,10 +6,7 @@ pub enum AppEvent {
 
     UpdateActiveUsersList(Vec<String>),
 
-    DownloadFile {
-        ticket: BlobTicket,
-        file_name: String,
-    },
+    DownloadFile(BlobTicket),
 
     FatalError(anyhow::Error),
 }

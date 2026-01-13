@@ -23,20 +23,12 @@ pub enum WebSocketMessage {
     },
     SendFile {
         recipient: String,
-        ticket: String,
-        file_name: String,
-    },
-    ReceiveFile {
-        ticket: String,
-        file_name: String,
-    },
-    DownloadFile {
         ticket: BlobTicket,
-        file_name: String,
     },
+    ReceiveFile(BlobTicket),
+    DownloadFile(BlobTicket),
 
     ErrorDeserializingJson(String),
-    UserNotFound,
 }
 
 impl WebSocketMessage {

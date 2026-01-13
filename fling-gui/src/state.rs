@@ -1,6 +1,5 @@
+use message_types::WebSocketMessage;
 use tokio::sync::mpsc::Receiver;
-
-use crate::message::WebSocketMessage;
 
 #[derive(Debug)]
 pub enum AppState {
