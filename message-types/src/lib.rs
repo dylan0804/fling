@@ -9,7 +9,6 @@ pub enum WebSocketMessage {
     Register {
         nickname: String,
     },
-    DisconnectUser(String),
 
     RegisterSuccess,
 

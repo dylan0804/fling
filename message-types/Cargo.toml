@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iroh = { workspace = true }
-iroh-blobs = { workspace = true }
+iroh.workspace = true
+iroh-blobs.workspace = true
+serde_json.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }

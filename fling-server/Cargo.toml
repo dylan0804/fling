@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures-util.workspace = true
+anyhow.workspace = true
+
 axum = { version = "0.8.8", features = ["ws", "macros"] }
 axum-extra = { version = "0.12.3", features = ["typed-header"] }
-tokio = { workspace = true, features = ["full"] }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-anyhow.workspace = true
 dashmap = "6.1.0"
-futures-util = { workspace = true }
 message_types = { path = "../message-types/" }

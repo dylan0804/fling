@@ -1,12 +1,12 @@
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf};
 
 use anyhow::{anyhow, Context};
 use eframe::CreationContext;
 use egui::{Align2, Color32, CornerRadius, DroppedFile, Id, LayerId, RichText, Stroke, Vec2};
 use egui_toast::{ToastKind, Toasts};
 use futures_util::{SinkExt, StreamExt};
-use iroh::{protocol::Router, EndpointAddr};
-use iroh_blobs::{api::{downloader::Shuffled, tags::TagInfo, Store}, format::collection::Collection, ticket::BlobTicket, Hash, HashAndFormat};
+use iroh::{protocol::Router};
+use iroh_blobs::{api::{remote::GetProgressItem}, format::collection::Collection, ticket::BlobTicket, BlobFormat};
 use message_types::WebSocketMessage;
 use names::{Generator, Name};
 use rfd::FileDialog;
@@ -22,6 +22,18 @@ mod state;
 mod toast;
 
 const WS_URL: &str = "wss://fling-server.fly.dev/ws";
+
+macro_rules! try_or_continue {
+    ($result:expr, $tx:expr, $msg:expr) => {
+       match $result {
+            Ok(val) => val,
+            Err(e) => {
+                $tx.send(AppEvent::FatalError(anyhow!(e).context($msg))).await.ok();
+                continue;
+            }
+        } 
+    };
+}
 
 #[tokio::main]
 async fn main() -> eframe::Result {
@@ -205,25 +217,11 @@ impl eframe::App for MyApp {
                                                     } => {
                                                         let abs_path = vec![PathBuf::from("/Users/dylanchristiandihalim/Downloads/26010044 - HANDIKA (2).pdf"), PathBuf::from("/Users/dylanchristiandihalim/Downloads/26010044 - HANDIKA.pdf")];
                                                         let hash = iroh_node.create_collection(abs_path, tx_clone.clone()).await.unwrap();
-                                                        let tag = HashAndFormat::hash_seq(hash);
-                                                        // let tag = match iroh_node
-                                                        //     .store
-                                                        //     .blobs()
-                                                        //     .deref(abs_path)
-                                                        //     .await {
-                                                        //         Ok(a) => a,
-                                                        //         Err(e) => {
-                                                        //             tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Error getting TagInfo"))).await.ok();
-                                                        //             continue;
-                                                        //         }
-                                                        // };
-                                                        //
-                                                        let node_id = iroh_node.endpoint.addr();
 
                                                         let ticket = BlobTicket::new(
-                                                            node_id,
-                                                            tag.hash,
-                                                            tag.format,
+                                                            iroh_node.endpoint.addr(),
+                                                            hash,
+                                                            BlobFormat::HashSeq,
                                                         );
 
                                                         let json = WebSocketMessage::SendFile { recipient, ticket }.to_json();
@@ -243,13 +241,42 @@ impl eframe::App for MyApp {
                                                         let downloader = iroh_node.store.downloader(&iroh_node.endpoint);
                                                         match downloader.download(ticket.hash(), Some(ticket.addr().id)).await {
                                                             Ok(_) =>  {
-                                                                let mut download_dir = download_dir.clone();
-                                                                // download_dir = download_dir.join(file_name);
-                                                                let store: Store = iroh_node.store.clone().into();
-                                                                match Collection::load(ticket.hash(), &store).await {
+                                                                let download_dir = download_dir.clone();
+                                                                let local_info = try_or_continue!(
+                                                                    iroh_node.store.remote().local(ticket.hash_and_format()).await, 
+                                                                    tx_clone, 
+                                                                    "Failed to get local info"
+                                                                );
+
+                                                                if !local_info.is_complete() {
+                                                                    let connection = try_or_continue!(
+                                                                        iroh_node.endpoint.connect(ticket.addr().id, iroh_blobs::ALPN).await, 
+                                                                        tx_clone, 
+                                                                        "Failed to connect to sender"
+                                                                    );
+                                                                    let get = iroh_node.store.remote().execute_get(connection, local_info.missing());
+                                                                    let mut stream = get.stream();
+                                                                    
+                                                                    while let Some(item) = stream.next().await {
+                                                                        match item {
+                                                                            GetProgressItem::Done(_) => break,
+                                                                            GetProgressItem::Error(e) => {
+                                                                                tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Error getting one of the files"))).await.ok();
+                                                                            }
+                                                                            _ => {}
+                                                                        }
+                                                                    }
+                                                                }
+
+                                                                match Collection::load(ticket.hash(), &iroh_node.store).await {
                                                                     Ok(c) => {
-                                                                        for (f, h) in c.iter() {
-                                                                            println!("file is {f}");
+                                                                        for (f, h) in c.into_iter() {
+                                                                            let p = download_dir.join(f);
+                                                                            if let Err(e) = iroh_node.store.blobs().export(h, p).await {
+                                                                                tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Error downloading file {p}: {e:?}")))
+                                                                                    .await
+                                                                                    .ok();
+                                                                            }
                                                                         }
                                                                     }
                                                                     Err(e) => {
@@ -456,19 +483,6 @@ impl eframe::App for MyApp {
                 self.toasts.show(ctx);
             });
     }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Err(e) = self
-            .to_ws
-            .try_send(WebSocketMessage::DisconnectUser(self.nickname.clone()))
-        {
-            self.tx
-                .try_send(AppEvent::FatalError(
-                    anyhow!(e).context("Disconnect send failed"),
-                ))
-                .ok();
-        }
-    }
 }
 
 async fn process_message(msg: Message, tx: Sender<AppEvent>) {
@@ -491,20 +505,6 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>) {
                         .ok();
                 }
                 WebSocketMessage::ReceiveFile(ticket ) => {
-                    // let a = Hash::from_str(&ticket).unWrap();
-                    // let ticket = HashAndFormat::hash_seq(a);
-                    // let ticket = match BlobTicket::from_str(&ticket) {
-                    //     Ok(t) => t,
-                    //     Err(e) => {
-                    //         tx.send(AppEvent::FatalError(
-                    //             anyhow!(e).context("Error parsing ticket to BlobTicket"),
-                    //         ))
-                    //             .await
-                    //             .ok();
-                    //         return;
-                    //     }
-                    // };
-                    //
                     tx.send(AppEvent::DownloadFile(ticket))
                         .await
                         .ok();

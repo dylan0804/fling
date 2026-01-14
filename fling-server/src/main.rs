@@ -125,17 +125,16 @@ async fn write(mut sender: SplitSink<WebSocket, Message>, mut rx: Receiver<WebSo
 }
 
 async fn read(mut receiver: SplitStream<WebSocket>, tx: Sender<WebSocketMessage>, state: AppState) {
+    let mut current_username = String::new();
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(bytes) => {
                 match serde_json::from_str::<WebSocketMessage>(bytes.as_str()) {
                     Ok(websocket_msg) => match websocket_msg {
                         WebSocketMessage::Register { nickname } => {
-                            state.users_list.insert(nickname, tx.clone());
+                            state.users_list.insert(nickname.clone(), tx.clone());
+                            current_username = nickname;
                             tx.send(WebSocketMessage::RegisterSuccess).await.ok();
-                        }
-                        WebSocketMessage::DisconnectUser(nickname) => {
-                            state.users_list.remove(&nickname);
                         }
                         WebSocketMessage::GetActiveUsersList(except) => {
                             let active_users_list = state
@@ -170,4 +169,6 @@ async fn read(mut receiver: SplitStream<WebSocket>, tx: Sender<WebSocketMessage>
             _ => {}
         }
     }
+
+    state.users_list.remove(&current_username);
 }
