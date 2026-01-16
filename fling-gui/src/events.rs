@@ -2,7 +2,7 @@ use iroh_blobs::ticket::BlobTicket;
 
 pub enum AppEvent {
     ReadyToPublishUser,
-    RegisterSuccess,
+    RegisterSuccess(Vec<String>),
     AddNewUser(String),
 
     DownloadFile(BlobTicket),

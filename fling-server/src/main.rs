@@ -102,10 +102,12 @@ async fn broadcast_read(
 async fn write(mut sender: SplitSink<WebSocket, Message>, mut rx: Receiver<WebSocketMessage>) {
     while let Some(msg) = rx.recv().await {
         match msg {
-            WebSocketMessage::RegisterSuccess => {
+            WebSocketMessage::RegisterSuccess(current_users) => {
                 sender
                     .send(Message::Text(
-                        WebSocketMessage::RegisterSuccess.to_json().into(),
+                        WebSocketMessage::RegisterSuccess(current_users)
+                            .to_json()
+                            .into(),
                     ))
                     .await
                     .ok();
@@ -151,7 +153,17 @@ async fn read(mut receiver: SplitStream<WebSocket>, tx: Sender<WebSocketMessage>
                         WebSocketMessage::Register { nickname } => {
                             state.users_list.insert(nickname.clone(), tx.clone());
                             current_username = nickname.clone();
-                            tx.send(WebSocketMessage::RegisterSuccess).await.ok();
+
+                            // get the already connected users
+                            let current_users = state
+                                .users_list
+                                .iter()
+                                .map(|r| r.key().clone())
+                                .filter(|n| &current_username != n)
+                                .collect();
+                            tx.send(WebSocketMessage::RegisterSuccess(current_users))
+                                .await
+                                .ok();
 
                             // notify every1
                             state

@@ -56,10 +56,9 @@ async fn main() -> eframe::Result {
 pub struct MyApp {
     app_state: AppState,
     nickname: String,
-    active_users_list: Vec<String>,
+    users: Vec<String>,
     toasts: Toasts,
     files: Vec<PathBuf>,
-    selected_file: PathBuf,
     tx: Sender<AppEvent>,
     rx: Receiver<AppEvent>,
     to_ws: Sender<WebSocketMessage>,
@@ -80,8 +79,7 @@ impl MyApp {
         Self {
             app_state: AppState::OnStartup(Some(from_ui)),
             files: vec![],
-            selected_file: PathBuf::new(),
-            active_users_list: vec![],
+            users: vec![],
             nickname: String::new(),
             download_dir: PathBuf::new(),
             to_ws,
@@ -128,12 +126,13 @@ impl eframe::App for MyApp {
                 while let Ok(app_event) = self.rx.try_recv() {
                     match app_event {
                         AppEvent::ReadyToPublishUser => self.app_state = AppState::PublishUser,
-                        AppEvent::RegisterSuccess => {
+                        AppEvent::RegisterSuccess(current_users) => {
+                            self.users = current_users;
                             self.app_state = AppState::Ready;
                         }
                         AppEvent::AddNewUser(nickname) => {
                             if nickname != self.nickname {
-                                self.active_users_list.push(nickname);
+                                self.users.push(nickname);
                             }
                         }
                         AppEvent::FatalError(e) => {
@@ -423,7 +422,7 @@ impl eframe::App for MyApp {
                         ui.label(RichText::new("Online").color(text_dim).size(12.0));
                         ui.add_space(4.0);
 
-                        if self.active_users_list.is_empty() {
+                        if self.users.is_empty() {
                             egui::Frame::new()
                                 .fill(bg_card)
                                 .corner_radius(8.0)
@@ -435,7 +434,7 @@ impl eframe::App for MyApp {
                                 });
                         } else {
                             egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                                for user in &self.active_users_list {
+                                for user in &self.users {
                                     egui::Frame::new()
                                         .fill(bg_card)
                                         .corner_radius(8.0)
@@ -495,8 +494,8 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>) {
     if let Message::Text(bytes) = msg {
         match serde_json::from_str::<WebSocketMessage>(bytes.as_str()) {
             Ok(websocket_msg) => match websocket_msg {
-                WebSocketMessage::RegisterSuccess => {
-                    tx.send(AppEvent::RegisterSuccess).await.ok();
+                WebSocketMessage::RegisterSuccess(current_users) => {
+                    tx.send(AppEvent::RegisterSuccess(current_users)).await.ok();
                 }
                 WebSocketMessage::UserJoined(nickname) => {
                     tx.send(AppEvent::AddNewUser(nickname)).await.ok();

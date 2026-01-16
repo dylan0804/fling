@@ -9,7 +9,7 @@ pub enum WebSocketMessage {
     Register {
         nickname: String,
     },
-    RegisterSuccess,
+    RegisterSuccess(Vec<String>),
     UserJoined(String),
 
     PrepareFile {
