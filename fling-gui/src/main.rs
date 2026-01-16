@@ -8,7 +8,7 @@ use egui::{vec2, Align2, Color32, CornerRadius, Id, LayerId, ProgressBar, RichTe
 use egui_toast::{ToastKind, Toasts};
 use futures_util::{SinkExt, StreamExt};
 use iroh::{protocol::Router};
-use iroh_blobs::{api::{remote::GetProgressItem}, format::collection::Collection, get::request::get_hash_seq_and_sizes, ticket::BlobTicket, BlobFormat};
+use iroh_blobs::{api::{remote::GetProgressItem, Store}, format::collection::Collection, get::request::get_hash_seq_and_sizes, ticket::BlobTicket, BlobFormat};
 use message_types::WebSocketMessage;
 use names::{Generator, Name};
 use rfd::FileDialog;
@@ -178,9 +178,10 @@ impl eframe::App for MyApp {
                                 let (sender, receiver) = ws_stream.0.split();
                                 Ok::<_, anyhow::Error>((sender, receiver))
                             };
-
+                            
+                            let download_dir_1 = download_dir.clone();
                             let iroh_init = async {
-                                let iroh_node = IrohNode::new()
+                                let iroh_node = IrohNode::new(download_dir_1)
                                     .await
                                     .context("Iroh node initialization failed")?;
 
@@ -288,8 +289,8 @@ impl eframe::App for MyApp {
                                                                         }
                                                                     }
                                                                 }
-
-                                                                match Collection::load(ticket.hash(), &iroh_node.store).await {
+                                                                
+                                                                match Collection::load(ticket.hash(), iroh_node.store.as_ref()).await {
                                                                     Ok(c) => {
                                                                         for (f, h) in c.into_iter() {
                                                                             let p = download_dir.join(f);
@@ -299,6 +300,7 @@ impl eframe::App for MyApp {
                                                                                     .ok();
                                                                             }
                                                                         }
+                                                                        iroh_node.store.tags().delete_all().await.unwrap();
                                                                     }
                                                                     Err(e) => {
                                                                         tx_clone.send(AppEvent::FatalError(e.context("Error loading collection"))).await.ok();

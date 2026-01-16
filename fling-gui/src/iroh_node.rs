@@ -7,7 +7,7 @@ use iroh::Endpoint;
 use iroh_blobs::{
     api::{tags::TagInfo, Store, TempTag},
     format::collection::Collection,
-    store::mem::MemStore,
+    store::{fs::FsStore, mem::MemStore},
     BlobsProtocol, Hash,
 };
 use memmap2::Mmap;
@@ -19,14 +19,14 @@ const CHUNK_SIZE: usize = 1024 * 1024 * 32;
 
 pub struct IrohNode {
     pub endpoint: Endpoint,
-    pub store: Store,
+    pub store: FsStore,
     pub blobs: BlobsProtocol,
 }
 
 impl IrohNode {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(download_dir: PathBuf) -> Result<Self> {
         let endpoint = Endpoint::bind().await?;
-        let store = MemStore::new().into();
+        let store = FsStore::load(download_dir).await?;
         let blobs = BlobsProtocol::new(&store, None);
 
         Ok(Self {
@@ -41,6 +41,7 @@ impl IrohNode {
         files: Vec<PathBuf>,
         tx: Sender<AppEvent>,
     ) -> Result<Hash> {
+        let batcher = self.store.batch().await?;
         let futures = files.iter().map(|p| async {
             let file_name = p.file_name().and_then(|a| a.to_str()).unwrap_or_default();
             let tag_info = self.store.blobs().add_path(p.clone()).await?;
