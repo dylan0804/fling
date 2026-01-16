@@ -3,12 +3,11 @@ use std::{env, net::SocketAddr, sync::Arc};
 use anyhow::Result;
 use axum::{
     extract::{
-        ws::{Message, Utf8Bytes, WebSocket},
-        ConnectInfo, Path, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+        ConnectInfo, State, WebSocketUpgrade,
     },
     response::IntoResponse,
-    routing::{any, post},
-    Json, Router,
+    routing::{any, Router},
 };
 use axum_extra::{headers::UserAgent, TypedHeader};
 use dashmap::DashMap;
@@ -19,18 +18,24 @@ use futures_util::{
 use message_types::WebSocketMessage;
 use tokio::{
     net::TcpListener,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        broadcast,
+        mpsc::{self, Receiver, Sender},
+    },
 };
 
 #[derive(Clone)]
 struct AppState {
     users_list: Arc<DashMap<String, Sender<WebSocketMessage>>>,
+    broadcast_tx: tokio::sync::broadcast::Sender<WebSocketMessage>,
 }
 
 impl AppState {
     fn new() -> Self {
+        let (broadcast_tx, _) = broadcast::channel::<WebSocketMessage>(100);
         Self {
             users_list: Arc::new(DashMap::new()),
+            broadcast_tx,
         }
     }
 }
@@ -69,15 +74,29 @@ async fn ws_handler(
     ws.on_failed_upgrade(|e| {
         println!("error upgrading ws: {:?}", e);
     })
-    .on_upgrade(move |socket| handle_socket(socket, state, addr))
+    .on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, who: SocketAddr) {
+async fn handle_socket(socket: WebSocket, state: AppState) {
     let (sender, receiver) = socket.split();
     let (tx, rx) = mpsc::channel::<WebSocketMessage>(100);
 
+    let broadcast_rx = state.broadcast_tx.subscribe();
+
     tokio::spawn(write(sender, rx));
-    tokio::spawn(read(receiver, tx, state));
+    tokio::spawn(read(receiver, tx.clone(), state));
+    tokio::spawn(broadcast_read(broadcast_rx, tx));
+}
+
+async fn broadcast_read(
+    mut broadcast_rx: tokio::sync::broadcast::Receiver<WebSocketMessage>,
+    tx: tokio::sync::mpsc::Sender<WebSocketMessage>,
+) {
+    while let Ok(websocket_msg) = broadcast_rx.recv().await {
+        if let WebSocketMessage::UserJoined(nickname) = websocket_msg {
+            tx.send(WebSocketMessage::UserJoined(nickname)).await.ok();
+        }
+    }
 }
 
 async fn write(mut sender: SplitSink<WebSocket, Message>, mut rx: Receiver<WebSocketMessage>) {
@@ -91,12 +110,10 @@ async fn write(mut sender: SplitSink<WebSocket, Message>, mut rx: Receiver<WebSo
                     .await
                     .ok();
             }
-            WebSocketMessage::ActiveUsersList(active_users_list) => {
+            WebSocketMessage::UserJoined(nickname) => {
                 sender
                     .send(Message::Text(
-                        WebSocketMessage::ActiveUsersList(active_users_list)
-                            .to_json()
-                            .into(),
+                        WebSocketMessage::UserJoined(nickname).to_json().into(),
                     ))
                     .await
                     .ok();
@@ -133,19 +150,13 @@ async fn read(mut receiver: SplitStream<WebSocket>, tx: Sender<WebSocketMessage>
                     Ok(websocket_msg) => match websocket_msg {
                         WebSocketMessage::Register { nickname } => {
                             state.users_list.insert(nickname.clone(), tx.clone());
-                            current_username = nickname;
+                            current_username = nickname.clone();
                             tx.send(WebSocketMessage::RegisterSuccess).await.ok();
-                        }
-                        WebSocketMessage::GetActiveUsersList(except) => {
-                            let active_users_list = state
-                                .users_list
-                                .iter()
-                                .filter(|ref_multi| &except != ref_multi.key())
-                                .map(|ref_multi| ref_multi.key().clone())
-                                .collect::<Vec<String>>();
 
-                            tx.send(WebSocketMessage::ActiveUsersList(active_users_list))
-                                .await
+                            // notify every1
+                            state
+                                .broadcast_tx
+                                .send(WebSocketMessage::UserJoined(nickname))
                                 .ok();
                         }
                         WebSocketMessage::SendFile { recipient, ticket } => {

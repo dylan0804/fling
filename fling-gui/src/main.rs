@@ -1,8 +1,8 @@
-use std::{path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Context};
-use eframe::CreationContext;
-use egui::{Align2, Color32, CornerRadius, DroppedFile, Id, LayerId, RichText, Stroke, Vec2};
+use eframe::{CreationContext};
+use egui::{vec2, Align2, Color32, CornerRadius, Id, LayerId, RichText, Stroke, Vec2};
 use egui_toast::{ToastKind, Toasts};
 use futures_util::{SinkExt, StreamExt};
 use iroh::{protocol::Router};
@@ -59,7 +59,6 @@ pub struct MyApp {
     active_users_list: Vec<String>,
     toasts: Toasts,
     files: Vec<PathBuf>,
-    dropped_files: Vec<DroppedFile>,
     selected_file: PathBuf,
     tx: Sender<AppEvent>,
     rx: Receiver<AppEvent>,
@@ -81,7 +80,6 @@ impl MyApp {
         Self {
             app_state: AppState::OnStartup(Some(from_ui)),
             files: vec![],
-            dropped_files: vec![],
             selected_file: PathBuf::new(),
             active_users_list: vec![],
             nickname: String::new(),
@@ -131,11 +129,12 @@ impl eframe::App for MyApp {
                     match app_event {
                         AppEvent::ReadyToPublishUser => self.app_state = AppState::PublishUser,
                         AppEvent::RegisterSuccess => {
-                            self.show_toast("Connected!", ToastKind::Success);
                             self.app_state = AppState::Ready;
                         }
-                        AppEvent::UpdateActiveUsersList(active_users_list) => {
-                            self.active_users_list = active_users_list;
+                        AppEvent::AddNewUser(nickname) => {
+                            if nickname != self.nickname {
+                                self.active_users_list.push(nickname);
+                            }
                         }
                         AppEvent::FatalError(e) => {
                             self.show_toast(format!("{e:#}"), ToastKind::Error);
@@ -212,11 +211,9 @@ impl eframe::App for MyApp {
                                                 match websocket_msg {
                                                     WebSocketMessage::PrepareFile {
                                                         recipient,
-                                                        abs_path,
-                                                        file_name
+                                                        files,
                                                     } => {
-                                                        let abs_path = vec![PathBuf::from("/Users/dylanchristiandihalim/Downloads/26010044 - HANDIKA (2).pdf"), PathBuf::from("/Users/dylanchristiandihalim/Downloads/26010044 - HANDIKA.pdf")];
-                                                        let hash = iroh_node.create_collection(abs_path, tx_clone.clone()).await.unwrap();
+                                                        let hash = iroh_node.create_collection(files, tx_clone.clone()).await.unwrap();
 
                                                         let ticket = BlobTicket::new(
                                                             iroh_node.endpoint.addr(),
@@ -283,10 +280,6 @@ impl eframe::App for MyApp {
                                                                         tx_clone.send(AppEvent::FatalError(e.context("Error loading collection"))).await.ok();
                                                                     }
                                                                 }
-
-                                                                // if let Err(e) = iroh_node.store.blobs().export(ticket.hash(), download_dir).await {
-                                                                //    tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Failed to save file to Downloads"))).await.ok();
-                                                                // }
                                                             }
                                                             Err(e ) => {
                                                                 tx_clone.send(AppEvent::FatalError(e.context("Download failed"))).await.ok();
@@ -367,25 +360,59 @@ impl eframe::App for MyApp {
                                         ui.label(RichText::new("📁").size(32.0));
                                         ui.add_space(8.0);
                                         if ui.link(RichText::new("Click to select a file").color(accent_color).size(14.0)).clicked() {
-                                            if let Some(file) = FileDialog::new().set_directory("/").pick_file() {
-                                                self.files.push(file);
+                                            if let Some(file) = FileDialog::new().set_directory("/").pick_files() {
+                                                self.files.extend(file);
                                             }
                                         }
                                         ui.label(RichText::new("or drag and drop").color(text_dim).size(12.0));
                                     } else {
-                                        for file in &self.files {
-                                            ui.horizontal(|ui| {
-                                                ui.label(egui_material_icons::icon_text(egui_material_icons::icons::ICON_CHECK).color(Color32::from_rgb(80, 200, 120)));
-                                                ui.label(RichText::new(file.file_name().unwrap_or_default().to_string_lossy()).strong());
-                                            });
-                                        }
                                         ui.add_space(8.0);
-                                        if ui.link(RichText::new("Change file").color(accent_color).size(12.0)).clicked() {
-                                            if let Some(file) = FileDialog::new().set_directory("/").pick_file() {
-                                                self.files.clear();
-                                                self.files.push(file);
-                                            }
+                                        let mut file_to_remove: Option<usize> = None;
+                                        ui.spacing_mut().item_spacing = vec2(8., 8.);
+                                        for (index, file) in self.files.iter().enumerate() {
+                                            egui::Frame::default()
+                                                .corner_radius(8)
+                                                .fill(Color32::from_rgb(45, 45, 50))
+                                                .inner_margin(vec2(8., 8.))
+                                                .show(ui, |ui| {
+                                                    ui.set_min_width(120.0);
+                                                    ui.vertical(|ui| {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(RichText::new("📄").size(20.0));
+                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                                                if ui.small_button(
+                                                                    RichText::new("×").size(16.0).color(Color32::from_rgb(200, 80, 80))
+                                                                ).on_hover_text("Remove").clicked() {
+                                                                    file_to_remove = Some(index);
+                                                                }
+                                                            });
+                                                        });
+                                                        ui.add_space(4.0);
+                                                        ui.label(
+                                                            RichText::new(file.file_name().unwrap_or_default().to_string_lossy())
+                                                                .size(12.0)
+                                                        );
+                                                    });
+                                                });
                                         }
+                                        
+                                        if let Some(index) = file_to_remove {
+                                            self.files.remove(index);
+                                        }
+                                        
+                                        ui.add_space(12.0);
+                                        
+                                        ui.horizontal(|ui| {
+                                            if ui.link(RichText::new("+ Add more files").color(accent_color).size(12.0)).clicked() {
+                                                if let Some(files) = FileDialog::new().set_directory("/").pick_files() {
+                                                    self.files.extend(files);
+                                                }
+                                            }
+                                            ui.label(RichText::new("•").color(text_dim).size(12.0));
+                                            if ui.link(RichText::new("Clear all").color(accent_color).size(12.0)).clicked() {
+                                                self.files.clear();
+                                            }
+                                        });
                                     }
                                 });
                             });
@@ -395,19 +422,6 @@ impl eframe::App for MyApp {
                         // online users section
                         ui.label(RichText::new("Online").color(text_dim).size(12.0));
                         ui.add_space(4.0);
-
-                        // fetch users when file is selected
-                        if !self.files.is_empty() && self.active_users_list.is_empty() {
-                            if let Err(e) = self.to_ws.try_send(
-                                WebSocketMessage::GetActiveUsersList(self.nickname.clone()),
-                            ) {
-                                self.tx
-                                    .try_send(AppEvent::FatalError(anyhow!(e).context(
-                                        "Failed to send WebSocket message to pipe",
-                                    )))
-                                    .ok();
-                            }
-                        }
 
                         if self.active_users_list.is_empty() {
                             egui::Frame::new()
@@ -440,20 +454,9 @@ impl eframe::App for MyApp {
                                                         .fill(if has_file { accent_color } else { bg_dark })
                                                         .corner_radius(6.0);
                                                     if ui.add_enabled(has_file, btn).clicked() {
-                                                        self.selected_file = self.files[0].clone();
-                                                        let Ok(abs_path) = std::path::absolute(&self.selected_file) else {
-                                                            self.tx.try_send(AppEvent::FatalError(anyhow!("Invalid path"))).ok();
-                                                            return;
-                                                        };
-                                                        let file_name = abs_path.file_name()
-                                                            .and_then(|a| a.to_str())
-                                                            .unwrap_or_default()
-                                                            .to_string();
-
                                                         if let Err(e) = self.to_ws.try_send(WebSocketMessage::PrepareFile {
                                                             recipient: user.clone(),
-                                                            abs_path,
-                                                            file_name
+                                                            files: self.files.clone(),
                                                         }) {
                                                             self.tx
                                                                 .try_send(AppEvent::FatalError(
@@ -474,7 +477,10 @@ impl eframe::App for MyApp {
 
                         ctx.input(|i| {
                             if !i.raw.dropped_files.is_empty() {
-                                self.dropped_files.clone_from(&i.raw.dropped_files);
+                                let dropped_files = i.raw.dropped_files.iter()
+                                    .map(|d| d.path.clone().unwrap_or_default())
+                                    .collect::<Vec<_>>();
+                                self.files.extend(dropped_files);
                             }
                         });
                     }
@@ -492,17 +498,15 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>) {
                 WebSocketMessage::RegisterSuccess => {
                     tx.send(AppEvent::RegisterSuccess).await.ok();
                 }
+                WebSocketMessage::UserJoined(nickname) => {
+                    tx.send(AppEvent::AddNewUser(nickname)).await.ok();
+                }
                 WebSocketMessage::ErrorDeserializingJson(e) => {
                     tx.send(AppEvent::FatalError(
                         anyhow!(e).context("Server JSON error"),
                     ))
                     .await
                     .ok();
-                }
-                WebSocketMessage::ActiveUsersList(active_users_list) => {
-                    tx.send(AppEvent::UpdateActiveUsersList(active_users_list))
-                        .await
-                        .ok();
                 }
                 WebSocketMessage::ReceiveFile(ticket ) => {
                     tx.send(AppEvent::DownloadFile(ticket))

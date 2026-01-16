@@ -3,22 +3,18 @@ use std::path::PathBuf;
 use iroh_blobs::ticket::BlobTicket;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum WebSocketMessage {
     Register {
         nickname: String,
     },
-
     RegisterSuccess,
-
-    GetActiveUsersList(String),
-    ActiveUsersList(Vec<String>),
+    UserJoined(String),
 
     PrepareFile {
         recipient: String,
-        abs_path: PathBuf,
-        file_name: String,
+        files: Vec<PathBuf>,
     },
     SendFile {
         recipient: String,
