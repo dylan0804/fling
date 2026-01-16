@@ -193,5 +193,10 @@ async fn read(mut receiver: SplitStream<WebSocket>, tx: Sender<WebSocketMessage>
         }
     }
 
+    // remove user and notify the others
     state.users_list.remove(&current_username);
+    state
+        .broadcast_tx
+        .send(WebSocketMessage::UserLeft(current_username))
+        .ok();
 }

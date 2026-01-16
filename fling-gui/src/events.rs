@@ -4,6 +4,7 @@ pub enum AppEvent {
     ReadyToPublishUser,
     RegisterSuccess(Vec<String>),
     AddNewUser(String),
+    RemoveUser(String),
 
     DownloadFile(BlobTicket),
 

@@ -11,6 +11,7 @@ pub enum WebSocketMessage {
     },
     RegisterSuccess(Vec<String>),
     UserJoined(String),
+    UserLeft(String),
 
     PrepareFile {
         recipient: String,

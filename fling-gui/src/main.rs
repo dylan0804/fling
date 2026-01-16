@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use anyhow::{anyhow, Context};
 use eframe::{CreationContext};
@@ -57,7 +57,7 @@ async fn main() -> eframe::Result {
 pub struct MyApp {
     app_state: AppState,
     nickname: String,
-    users: Vec<String>,
+    users: HashSet<String>,
     toasts: Toasts,
     files: Vec<PathBuf>,
     tx: Sender<AppEvent>,
@@ -80,7 +80,7 @@ impl MyApp {
         Self {
             app_state: AppState::OnStartup(Some(from_ui)),
             files: vec![],
-            users: vec![],
+            users: HashSet::new(),
             nickname: String::new(),
             download_dir: PathBuf::new(),
             to_ws,
@@ -128,13 +128,17 @@ impl eframe::App for MyApp {
                     match app_event {
                         AppEvent::ReadyToPublishUser => self.app_state = AppState::PublishUser,
                         AppEvent::RegisterSuccess(current_users) => {
-                            self.users = current_users;
+                            let users = HashSet::from_iter(current_users);
+                            self.users = users;
                             self.app_state = AppState::Ready;
                         }
                         AppEvent::AddNewUser(nickname) => {
                             if nickname != self.nickname {
-                                self.users.push(nickname);
+                                self.users.insert(nickname);
                             }
+                        }
+                        AppEvent::RemoveUser(nickname) => {
+                            self.users.remove(&nickname);
                         }
                         AppEvent::FatalError(e) => {
                             self.show_toast(format!("{e:#}"), ToastKind::Error);
@@ -504,12 +508,15 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>, ctx: egui::Context)
                 WebSocketMessage::UserJoined(nickname) => {
                     tx.send(AppEvent::AddNewUser(nickname)).await.ok();
                 }
+                WebSocketMessage::UserLeft(nickname) => {
+                    tx.send(AppEvent::RemoveUser(nickname)).await.ok();
+                }
                 WebSocketMessage::ErrorDeserializingJson(e) => {
                     tx.send(AppEvent::FatalError(
                         anyhow!(e).context("Server JSON error"),
                     ))
-                    .await
-                    .ok();
+                        .await
+                        .ok();
                 }
                 WebSocketMessage::ReceiveFile(ticket ) => {
                     tx.send(AppEvent::DownloadFile(ticket))
