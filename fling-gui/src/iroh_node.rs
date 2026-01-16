@@ -5,15 +5,17 @@ use bytes::Bytes;
 use futures_util::future::join_all;
 use iroh::Endpoint;
 use iroh_blobs::{
-    api::{Store, TempTag},
+    api::{tags::TagInfo, Store, TempTag},
     format::collection::Collection,
     store::mem::MemStore,
     BlobsProtocol, Hash,
 };
 use memmap2::Mmap;
-use tokio::sync::mpsc::Sender;
+use tokio::{io::AsyncReadExt, sync::mpsc::Sender};
 
 use crate::events::AppEvent;
+
+const CHUNK_SIZE: usize = 1024 * 1024 * 32;
 
 pub struct IrohNode {
     pub endpoint: Endpoint,
@@ -39,24 +41,20 @@ impl IrohNode {
         files: Vec<PathBuf>,
         tx: Sender<AppEvent>,
     ) -> Result<Hash> {
-        let batcher = self.store.batch().await?;
         let futures = files.iter().map(|p| async {
             let file_name = p.file_name().and_then(|a| a.to_str()).unwrap_or_default();
-            let file = File::open(p.clone())?;
-            let content = unsafe { Mmap::map(&file)? };
-            let bytes = Bytes::copy_from_slice(&content);
-            let tmp_tag = batcher.add_bytes(bytes).await?;
+            let tag_info = self.store.blobs().add_path(p.clone()).await?;
 
-            Ok::<_, anyhow::Error>((file_name, tmp_tag))
+            Ok::<_, anyhow::Error>((file_name, tag_info))
         });
 
         let results = join_all(futures).await;
-        let mut collection_items: HashMap<&str, TempTag> = HashMap::new();
+        let mut collection_items: HashMap<&str, TagInfo> = HashMap::new();
 
         for result in results {
             match result {
-                Ok((file_name, tmp_tag)) => {
-                    collection_items.insert(file_name, tmp_tag);
+                Ok((file_name, tag_info)) => {
+                    collection_items.insert(file_name, tag_info);
                 }
                 Err(e) => {
                     tx.send(AppEvent::FatalError(e.context("Failed to add blob")))
@@ -68,7 +66,7 @@ impl IrohNode {
 
         let collection_items = collection_items
             .into_iter()
-            .map(|(f, tag)| (f.to_string(), tag.hash()))
+            .map(|(f, tag)| (f.to_string(), tag.hash))
             .collect::<Vec<_>>();
 
         let collection = Collection::from_iter(collection_items);

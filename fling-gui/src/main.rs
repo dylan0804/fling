@@ -39,8 +39,6 @@ macro_rules! try_or_continue {
 
 #[tokio::main]
 async fn main() -> eframe::Result {
-    // env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
-
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_resizable(true)
@@ -200,11 +198,11 @@ impl eframe::App for MyApp {
                                     Ok(((mut sender, mut receiver), (iroh_node, router))) => {
                                         // get ws msg
                                         let tx_clone = tx.clone();
-                                        let ctx_clone = ctx_clone.clone();
+                                        let ctx_clone_1 = ctx_clone.clone();
                                         tokio::spawn(async move {
                                             loop {
                                                 match receiver.next().await {
-                                                    Some(Ok(msg)) => process_message(msg, tx_clone.clone(), ctx_clone.clone()).await,
+                                                    Some(Ok(msg)) => process_message(msg, tx_clone.clone(), ctx_clone_1.clone()).await,
                                                     Some(Err(e)) => {
                                                         tx_clone.send(AppEvent::FatalError(anyhow!(e).context("WebSocket error"))).await.ok();
                                                         break;
@@ -220,6 +218,7 @@ impl eframe::App for MyApp {
                                         // send ws msg
                                         let tx_clone = tx.clone();
                                         let download_dir = download_dir.clone();
+                                        let ctx_clone_2 = ctx_clone.clone();
                                         tokio::spawn(async move {
                                             while let Some(websocket_msg) = ws_receiver.recv().await {
                                                 match websocket_msg {
@@ -280,6 +279,7 @@ impl eframe::App for MyApp {
                                                                             GetProgressItem::Progress(b) => {
                                                                                 let value = b as f32 / actual_size as f32;
                                                                                 tx_clone.send(AppEvent::UpdateProgressValue(value)).await.ok();
+                                                                                ctx_clone_2.request_repaint();
                                                                             }
                                                                             GetProgressItem::Done(_) => break,
                                                                             GetProgressItem::Error(e) => {
