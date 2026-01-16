@@ -93,8 +93,14 @@ async fn broadcast_read(
     tx: tokio::sync::mpsc::Sender<WebSocketMessage>,
 ) {
     while let Ok(websocket_msg) = broadcast_rx.recv().await {
-        if let WebSocketMessage::UserJoined(nickname) = websocket_msg {
-            tx.send(WebSocketMessage::UserJoined(nickname)).await.ok();
+        match websocket_msg {
+            WebSocketMessage::UserJoined(nickname) => {
+                tx.send(WebSocketMessage::UserJoined(nickname)).await.ok();
+            }
+            WebSocketMessage::UserLeft(nickname) => {
+                tx.send(WebSocketMessage::UserLeft(nickname)).await.ok();
+            }
+            _ => {}
         }
     }
 }
@@ -116,6 +122,14 @@ async fn write(mut sender: SplitSink<WebSocket, Message>, mut rx: Receiver<WebSo
                 sender
                     .send(Message::Text(
                         WebSocketMessage::UserJoined(nickname).to_json().into(),
+                    ))
+                    .await
+                    .ok();
+            }
+            WebSocketMessage::UserLeft(nickname) => {
+                sender
+                    .send(Message::Text(
+                        WebSocketMessage::UserLeft(nickname).to_json().into(),
                     ))
                     .await
                     .ok();

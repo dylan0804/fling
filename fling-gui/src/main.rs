@@ -1,12 +1,14 @@
+
+
 use std::{collections::HashSet, path::PathBuf};
 
 use anyhow::{anyhow, Context};
 use eframe::{CreationContext};
-use egui::{vec2, Align2, Color32, CornerRadius, Id, LayerId, RichText, Stroke, Vec2};
+use egui::{vec2, Align2, Color32, CornerRadius, Id, LayerId, ProgressBar, RichText, Stroke, Vec2, Widget};
 use egui_toast::{ToastKind, Toasts};
 use futures_util::{SinkExt, StreamExt};
 use iroh::{protocol::Router};
-use iroh_blobs::{api::{remote::GetProgressItem}, format::collection::Collection, ticket::BlobTicket, BlobFormat};
+use iroh_blobs::{api::{remote::GetProgressItem}, format::collection::Collection, get::request::get_hash_seq_and_sizes, ticket::BlobTicket, BlobFormat};
 use message_types::WebSocketMessage;
 use names::{Generator, Name};
 use rfd::FileDialog;
@@ -64,6 +66,7 @@ pub struct MyApp {
     rx: Receiver<AppEvent>,
     to_ws: Sender<WebSocketMessage>,
     download_dir: PathBuf,
+    progress: f32
 }
 
 impl MyApp {
@@ -83,6 +86,7 @@ impl MyApp {
             users: HashSet::new(),
             nickname: String::new(),
             download_dir: PathBuf::new(),
+            progress: 0.,
             to_ws,
             toasts,
             rx,
@@ -106,16 +110,16 @@ impl eframe::App for MyApp {
         let bg_card = Color32::from_rgb(40, 40, 40);
         let text_dim = Color32::from_rgb(140, 140, 140);
 
+        let online_icon = egui_material_icons::icon_text(egui_material_icons::icons::ICON_CIRCLE)
+            .color(Color32::from_rgb(80, 200, 120))
+            .size(12.0);
+
         // top panel
         egui::TopBottomPanel::top("header")
             .frame(egui::Frame::new().fill(bg_dark).inner_margin(12.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui_material_icons::icon_text(egui_material_icons::icons::ICON_CIRCLE)
-                            .color(Color32::from_rgb(80, 200, 120))
-                            .size(12.0),
-                    );
+                    ui.label(online_icon.clone());
                     ui.label(RichText::new(&self.nickname).strong().size(14.0));
                 });
             });
@@ -140,11 +144,14 @@ impl eframe::App for MyApp {
                         AppEvent::RemoveUser(nickname) => {
                             self.users.remove(&nickname);
                         }
-                        AppEvent::FatalError(e) => {
-                            self.show_toast(format!("{e:#}"), ToastKind::Error);
+                        AppEvent::UpdateProgressValue(value) => {
+                            self.progress = value;
                         }
                         AppEvent::DownloadFile(ticket) => {
                             self.to_ws.try_send(WebSocketMessage::DownloadFile(ticket)).ok();
+                        }
+                        AppEvent::FatalError(e) => {
+                            self.show_toast(format!("{e:#}"), ToastKind::Error);
                         }
                     }
                 }
@@ -209,7 +216,7 @@ impl eframe::App for MyApp {
                                                 }
                                             }
                                         });
-
+ 
                                         // send ws msg
                                         let tx_clone = tx.clone();
                                         let download_dir = download_dir.clone();
@@ -258,16 +265,26 @@ impl eframe::App for MyApp {
                                                                         tx_clone, 
                                                                         "Failed to connect to sender"
                                                                     );
+                                                                    let (_, size) = try_or_continue!(
+                                                                        get_hash_seq_and_sizes(&connection, &ticket.hash(), 1024 * 1024 * 1024 * 5, None).await,
+                                                                        tx_clone,
+                                                                        "Failed to get file(s) size"
+                                                                    );
+
+                                                                    // skip the 1st index, bcs its the collection blob and obv we don't need it
+                                                                    let actual_size = size.iter().skip(1).sum::<u64>();
                                                                     let get = iroh_node.store.remote().execute_get(connection, local_info.missing());
                                                                     let mut stream = get.stream();
-                                                                    
                                                                     while let Some(item) = stream.next().await {
                                                                         match item {
+                                                                            GetProgressItem::Progress(b) => {
+                                                                                let value = b as f32 / actual_size as f32;
+                                                                                tx_clone.send(AppEvent::UpdateProgressValue(value)).await.ok();
+                                                                            }
                                                                             GetProgressItem::Done(_) => break,
                                                                             GetProgressItem::Error(e) => {
-                                                                                tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Error getting one of the files"))).await.ok();
+                                                                                tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Error downloading one of the files"))).await.ok();
                                                                             }
-                                                                            _ => {}
                                                                         }
                                                                     }
                                                                 }
@@ -402,13 +419,13 @@ impl eframe::App for MyApp {
                                                     });
                                                 });
                                         }
-                                        
+
                                         if let Some(index) = file_to_remove {
                                             self.files.remove(index);
                                         }
-                                        
+
                                         ui.add_space(12.0);
-                                        
+
                                         ui.horizontal(|ui| {
                                             if ui.link(RichText::new("+ Add more files").color(accent_color).size(12.0)).clicked() {
                                                 if let Some(files) = FileDialog::new().set_directory("/").pick_files() {
@@ -449,7 +466,7 @@ impl eframe::App for MyApp {
                                         .inner_margin(12.0)
                                         .show(ui, |ui| {
                                             ui.horizontal(|ui| {
-                                                ui.label(RichText::new("○").color(text_dim).size(10.0));
+                                                ui.label(online_icon.clone());
                                                 ui.label(RichText::new(user).size(13.0));
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     let has_file = !self.files.is_empty();
@@ -491,6 +508,23 @@ impl eframe::App for MyApp {
                             }
                         });
                     }
+                }
+
+                // progress bar
+                if self.progress > 0.0 && self.progress < 1.0 {
+                    egui::TopBottomPanel::bottom("progress_panel")
+                        .frame(egui::Frame::new()
+                            .fill(Color32::from_rgba_unmultiplied(40, 40, 40, 240))
+                            .inner_margin(12.0))
+                        .show(ctx, |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("Transferring...").color(text_dim).size(11.0));
+                                ui.add_space(4.0);
+                                ProgressBar::new(self.progress)
+                                    .show_percentage()
+                                    .ui(ui);
+                            });
+                        });
                 }
 
                 self.toasts.show(ctx);

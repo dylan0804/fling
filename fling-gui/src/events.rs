@@ -6,6 +6,8 @@ pub enum AppEvent {
     AddNewUser(String),
     RemoveUser(String),
 
+    UpdateProgressValue(f32),
+
     DownloadFile(BlobTicket),
 
     FatalError(anyhow::Error),
