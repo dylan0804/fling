@@ -42,6 +42,7 @@ async fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_resizable(true)
+            .with_active(true)
             .with_inner_size([400.0, 500.0]),
         ..Default::default()
     };
@@ -158,6 +159,7 @@ impl eframe::App for MyApp {
 
                         let tx = self.tx.clone();
                         let download_dir = self.download_dir.clone();
+                        let ctx_clone = ctx.clone();
                         tokio::spawn(async move {
                             let ws_init = async {
                                 let ws_stream = connect_async(WS_URL)
@@ -181,15 +183,17 @@ impl eframe::App for MyApp {
                             };
 
                             let download_dir = download_dir.clone(); 
+                            let ctx_clone = ctx_clone.clone();
                             tokio::spawn(async move {
                                 match tokio::try_join!(ws_init, iroh_init) {
                                     Ok(((mut sender, mut receiver), (iroh_node, router))) => {
                                         // get ws msg
                                         let tx_clone = tx.clone();
+                                        let ctx_clone = ctx_clone.clone();
                                         tokio::spawn(async move {
                                             loop {
                                                 match receiver.next().await {
-                                                    Some(Ok(msg)) => process_message(msg, tx_clone.clone()).await,
+                                                    Some(Ok(msg)) => process_message(msg, tx_clone.clone(), ctx_clone.clone()).await,
                                                     Some(Err(e)) => {
                                                         tx_clone.send(AppEvent::FatalError(anyhow!(e).context("WebSocket error"))).await.ok();
                                                         break;
@@ -490,7 +494,7 @@ impl eframe::App for MyApp {
     }
 }
 
-async fn process_message(msg: Message, tx: Sender<AppEvent>) {
+async fn process_message(msg: Message, tx: Sender<AppEvent>, ctx: egui::Context) {
     if let Message::Text(bytes) = msg {
         match serde_json::from_str::<WebSocketMessage>(bytes.as_str()) {
             Ok(websocket_msg) => match websocket_msg {
@@ -523,6 +527,8 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>) {
             }
         }
     }
+
+    ctx.request_repaint();
 }
 
 fn preview_files_being_dropped(ctx: &egui::Context) {

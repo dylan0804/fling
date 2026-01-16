@@ -9,7 +9,7 @@ impl MyApp {
             text: text.into(),
             kind,
             options: ToastOptions::default()
-                .duration_in_seconds(3.)
+                .duration_in_seconds(4.)
                 .show_progress(true),
             ..Default::default()
         });
