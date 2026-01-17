@@ -23,4 +23,13 @@ impl MyApp {
             ..Default::default()
         });
     }
+
+    pub fn show_upload_toast(&mut self, text: impl Into<WidgetText>) {
+        self.toasts.add(Toast {
+            text: text.into(),
+            kind: ToastKind::Info,
+            options: ToastOptions::default().duration(None).show_progress(true),
+            ..Default::default()
+        });
+    }
 }

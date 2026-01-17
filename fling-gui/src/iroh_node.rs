@@ -1,21 +1,21 @@
-use std::{collections::HashMap, fs::File, path::PathBuf};
+use std::path::PathBuf;
 
-use anyhow::Result;
-use bytes::Bytes;
-use futures_util::future::join_all;
+use anyhow::{anyhow, Result};
+use futures_util::StreamExt;
 use iroh::Endpoint;
 use iroh_blobs::{
-    api::{tags::TagInfo, Store, TempTag},
+    api::{
+        blobs::{AddPathOptions, AddProgressItem},
+        TempTag,
+    },
     format::collection::Collection,
-    store::{fs::FsStore, mem::MemStore},
-    BlobsProtocol, Hash,
+    store::fs::FsStore,
+    BlobsProtocol,
 };
-use memmap2::Mmap;
-use tokio::{io::AsyncReadExt, sync::mpsc::Sender};
+use n0_future::BufferedStreamExt;
+use tokio::sync::mpsc::Sender;
 
 use crate::events::AppEvent;
-
-const CHUNK_SIZE: usize = 1024 * 1024 * 32;
 
 pub struct IrohNode {
     pub endpoint: Endpoint,
@@ -24,9 +24,9 @@ pub struct IrohNode {
 }
 
 impl IrohNode {
-    pub async fn new(download_dir: PathBuf) -> Result<Self> {
+    pub async fn new(download_dir: PathBuf, path: String) -> Result<Self> {
         let endpoint = Endpoint::bind().await?;
-        let store = FsStore::load(download_dir).await?;
+        let store = FsStore::load(download_dir.join(format!("fling-{}", path))).await?;
         let blobs = BlobsProtocol::new(&store, None);
 
         Ok(Self {
@@ -36,44 +36,62 @@ impl IrohNode {
         })
     }
 
-    pub async fn create_collection(
-        &self,
-        files: Vec<PathBuf>,
-        tx: Sender<AppEvent>,
-    ) -> Result<Hash> {
-        let batcher = self.store.batch().await?;
-        let futures = files.iter().map(|p| async {
-            let file_name = p.file_name().and_then(|a| a.to_str()).unwrap_or_default();
-            let tag_info = self.store.blobs().add_path(p.clone()).await?;
-
-            Ok::<_, anyhow::Error>((file_name, tag_info))
-        });
-
-        let results = join_all(futures).await;
-        let mut collection_items: HashMap<&str, TagInfo> = HashMap::new();
-
-        for result in results {
-            match result {
-                Ok((file_name, tag_info)) => {
-                    collection_items.insert(file_name, tag_info);
-                }
-                Err(e) => {
-                    tx.send(AppEvent::FatalError(e.context("Failed to add blob")))
-                        .await
-                        .ok();
-                }
-            }
-        }
-
-        let collection_items = collection_items
-            .into_iter()
-            .map(|(f, tag)| (f.to_string(), tag.hash))
+    pub async fn import(&self, files: Vec<PathBuf>, tx: Sender<AppEvent>) -> Result<TempTag> {
+        let collection = files
+            .iter()
+            .map(|p| {
+                let name = p
+                    .file_name()
+                    .and_then(|a| a.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                (name, p.clone())
+            })
             .collect::<Vec<_>>();
 
-        let collection = Collection::from_iter(collection_items);
-        let tt = collection.store(&self.store).await?;
-        self.store.tags().create(tt.hash_and_format()).await?;
+        let infos = n0_future::stream::iter(collection)
+            .map(|(name, path)| {
+                let store = self.store.clone();
+                let tx_clone = tx.clone();
+                async move {
+                    let import = store.add_path_with_opts(AddPathOptions {
+                        path,
+                        mode: iroh_blobs::api::blobs::ImportMode::TryReference,
+                        format: iroh_blobs::BlobFormat::Raw,
+                    });
 
-        Ok(tt.hash())
+                    let mut stream = import.stream().await;
+                    let mut item_size = 0;
+                    let temp_tag = loop {
+                        if let Some(item) = stream.next().await {
+                            match item {
+                                AddProgressItem::Size(size) => {}
+                                AddProgressItem::Done(tt) => {
+                                    break tt;
+                                }
+                                AddProgressItem::Error(e) => {
+                                    let context = format!("Error importing {}", name);
+                                    tx_clone
+                                        .send(AppEvent::FatalError(anyhow!(e).context(context)))
+                                        .await
+                                        .ok();
+                                }
+                                _ => {}
+                            }
+                        }
+                    };
+                    (name, temp_tag, item_size)
+                }
+            })
+            .buffered_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+
+        let collection = infos
+            .into_iter()
+            .map(|(name, tag, _)| (name, tag.hash()))
+            .collect::<Collection>();
+        let tt = collection.clone().store(&self.store).await?;
+        Ok(tt)
     }
 }

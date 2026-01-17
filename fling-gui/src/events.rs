@@ -7,8 +7,11 @@ pub enum AppEvent {
     RemoveUser(String),
 
     UpdateProgressValue(f32),
-
+    ImportStart,
+    ImportDone,
+    DownloadStart,
     DownloadFile(BlobTicket),
+    DownloadDone,
 
     FatalError(anyhow::Error),
 }

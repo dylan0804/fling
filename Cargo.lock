@@ -1822,7 +1822,6 @@ name = "fling-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "dirs",
  "eframe",
  "egui",
@@ -1831,8 +1830,8 @@ dependencies = [
  "futures-util",
  "iroh",
  "iroh-blobs",
- "memmap2",
  "message_types",
+ "n0-future",
  "names",
  "rfd",
  "serde",

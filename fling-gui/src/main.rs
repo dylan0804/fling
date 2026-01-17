@@ -64,6 +64,8 @@ pub struct MyApp {
     rx: Receiver<AppEvent>,
     to_ws: Sender<WebSocketMessage>,
     download_dir: PathBuf,
+    is_downloading: bool,
+    is_importing: bool,
     progress: f32
 }
 
@@ -84,6 +86,8 @@ impl MyApp {
             users: HashSet::new(),
             nickname: String::new(),
             download_dir: PathBuf::new(),
+            is_downloading: false,
+            is_importing: false,
             progress: 0.,
             to_ws,
             toasts,
@@ -145,9 +149,13 @@ impl eframe::App for MyApp {
                         AppEvent::UpdateProgressValue(value) => {
                             self.progress = value;
                         }
+                        AppEvent::ImportStart => self.is_importing = true,
+                        AppEvent::ImportDone => self.is_importing = false,
+                        AppEvent::DownloadStart => self.is_downloading = true,
                         AppEvent::DownloadFile(ticket) => {
                             self.to_ws.try_send(WebSocketMessage::DownloadFile(ticket)).ok();
                         }
+                        AppEvent::DownloadDone => self.is_downloading = false,
                         AppEvent::FatalError(e) => {
                             self.show_toast(format!("{e:#}"), ToastKind::Error);
                         }
@@ -169,6 +177,7 @@ impl eframe::App for MyApp {
                         let tx = self.tx.clone();
                         let download_dir = self.download_dir.clone();
                         let ctx_clone = ctx.clone();
+                        let nickname = self.nickname.clone();
                         tokio::spawn(async move {
                             let ws_init = async {
                                 let ws_stream = connect_async(WS_URL)
@@ -181,7 +190,7 @@ impl eframe::App for MyApp {
                             
                             let download_dir_1 = download_dir.clone();
                             let iroh_init = async {
-                                let iroh_node = IrohNode::new(download_dir_1)
+                                let iroh_node = IrohNode::new(download_dir_1, nickname)
                                     .await
                                     .context("Iroh node initialization failed")?;
 
@@ -227,11 +236,19 @@ impl eframe::App for MyApp {
                                                         recipient,
                                                         files,
                                                     } => {
-                                                        let hash = iroh_node.create_collection(files, tx_clone.clone()).await.unwrap();
+                                                        tx_clone.send(AppEvent::ImportStart).await.ok();
+                                                        ctx_clone_2.request_repaint();
+                                                        let tt = try_or_continue!(
+                                                            iroh_node.import(files, tx_clone.clone()).await,
+                                                            tx_clone,
+                                                            "Failed to import file(s)"
+                                                        );
+                                                        tx_clone.send(AppEvent::ImportDone).await.ok();
+                                                        ctx_clone_2.request_repaint();
 
                                                         let ticket = BlobTicket::new(
                                                             iroh_node.endpoint.addr(),
-                                                            hash,
+                                                            tt.hash(),
                                                             BlobFormat::HashSeq,
                                                         );
 
@@ -275,6 +292,7 @@ impl eframe::App for MyApp {
                                                                     let actual_size = size.iter().skip(1).sum::<u64>();
                                                                     let get = iroh_node.store.remote().execute_get(connection, local_info.missing());
                                                                     let mut stream = get.stream();
+                                                                    tx_clone.send(AppEvent::DownloadStart).await.ok();
                                                                     while let Some(item) = stream.next().await {
                                                                         match item {
                                                                             GetProgressItem::Progress(b) => {
@@ -282,7 +300,10 @@ impl eframe::App for MyApp {
                                                                                 tx_clone.send(AppEvent::UpdateProgressValue(value)).await.ok();
                                                                                 ctx_clone_2.request_repaint();
                                                                             }
-                                                                            GetProgressItem::Done(_) => break,
+                                                                            GetProgressItem::Done(_) => {
+                                                                                tx_clone.send(AppEvent::DownloadDone).await.ok();
+                                                                                break;
+                                                                            },
                                                                             GetProgressItem::Error(e) => {
                                                                                 tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Error downloading one of the files"))).await.ok();
                                                                             }
@@ -293,6 +314,7 @@ impl eframe::App for MyApp {
                                                                 match Collection::load(ticket.hash(), iroh_node.store.as_ref()).await {
                                                                     Ok(c) => {
                                                                         for (f, h) in c.into_iter() {
+                                                                            println!("file name is {f}");
                                                                             let p = download_dir.join(f);
                                                                             if let Err(e) = iroh_node.store.blobs().export(h, p).await {
                                                                                 tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Error downloading file {p}: {e:?}")))
@@ -512,8 +534,24 @@ impl eframe::App for MyApp {
                     }
                 }
 
+                // importing indicator
+                if self.is_importing {
+                    egui::TopBottomPanel::bottom("import_panel")
+                        .frame(egui::Frame::new()
+                            .fill(Color32::from_rgba_unmultiplied(40, 40, 40, 240))
+                            .inner_margin(12.0))
+                        .show(ctx, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("Preparing files...").color(text_dim).size(11.0));
+                            });
+                        });
+                    ctx.request_repaint();
+                }
+
                 // progress bar
-                if self.progress > 0.0 && self.progress < 1.0 {
+                if (self.progress > 0.0 && self.progress < 1.0) || self.is_downloading {
                     egui::TopBottomPanel::bottom("progress_panel")
                         .frame(egui::Frame::new()
                             .fill(Color32::from_rgba_unmultiplied(40, 40, 40, 240))
@@ -532,6 +570,14 @@ impl eframe::App for MyApp {
                 self.toasts.show(ctx);
             });
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+       // delete temp dir 
+       let temp_dir = self.download_dir.join(format!("fling-{}", self.nickname));
+       if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
+            self.tx.try_send(AppEvent::FatalError(anyhow!(e).context(format!("Failed to delete temp dir {:?}, be sure to delete it yourself", temp_dir)))).ok();
+       }
+    }
 }
 
 async fn process_message(msg: Message, tx: Sender<AppEvent>, ctx: egui::Context) {
@@ -547,15 +593,15 @@ async fn process_message(msg: Message, tx: Sender<AppEvent>, ctx: egui::Context)
                 WebSocketMessage::UserLeft(nickname) => {
                     tx.send(AppEvent::RemoveUser(nickname)).await.ok();
                 }
+                WebSocketMessage::ReceiveFile(ticket ) => {
+                    tx.send(AppEvent::DownloadFile(ticket))
+                        .await
+                        .ok();
+                }
                 WebSocketMessage::ErrorDeserializingJson(e) => {
                     tx.send(AppEvent::FatalError(
                         anyhow!(e).context("Server JSON error"),
                     ))
-                        .await
-                        .ok();
-                }
-                WebSocketMessage::ReceiveFile(ticket ) => {
-                    tx.send(AppEvent::DownloadFile(ticket))
                         .await
                         .ok();
                 }
