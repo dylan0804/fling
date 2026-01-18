@@ -13,6 +13,7 @@ use iroh_blobs::{
     BlobsProtocol,
 };
 use n0_future::BufferedStreamExt;
+use serde_json::to_string;
 use tokio::sync::mpsc::Sender;
 
 use crate::events::AppEvent;
@@ -38,14 +39,14 @@ impl IrohNode {
 
     pub async fn import(&self, files: Vec<PathBuf>, tx: Sender<AppEvent>) -> Result<TempTag> {
         let collection = files
-            .iter()
+            .into_iter()
             .map(|p| {
                 let name = p
                     .file_name()
                     .and_then(|a| a.to_str())
                     .unwrap_or_default()
                     .to_string();
-                (name, p.clone())
+                (name, p)
             })
             .collect::<Vec<_>>();
 
@@ -61,11 +62,9 @@ impl IrohNode {
                     });
 
                     let mut stream = import.stream().await;
-                    let mut item_size = 0;
                     let temp_tag = loop {
                         if let Some(item) = stream.next().await {
                             match item {
-                                AddProgressItem::Size(size) => {}
                                 AddProgressItem::Done(tt) => {
                                     break tt;
                                 }
@@ -80,7 +79,7 @@ impl IrohNode {
                             }
                         }
                     };
-                    (name, temp_tag, item_size)
+                    (name, temp_tag)
                 }
             })
             .buffered_unordered(8)
@@ -89,7 +88,7 @@ impl IrohNode {
 
         let collection = infos
             .into_iter()
-            .map(|(name, tag, _)| (name, tag.hash()))
+            .map(|(name, tag)| (name, tag.hash()))
             .collect::<Collection>();
         let tt = collection.clone().store(&self.store).await?;
         Ok(tt)

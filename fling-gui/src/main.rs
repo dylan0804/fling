@@ -8,7 +8,7 @@ use egui::{vec2, Align2, Color32, CornerRadius, Id, LayerId, ProgressBar, RichTe
 use egui_toast::{ToastKind, Toasts};
 use futures_util::{SinkExt, StreamExt};
 use iroh::{protocol::Router};
-use iroh_blobs::{api::{remote::GetProgressItem, Store}, format::collection::Collection, get::request::get_hash_seq_and_sizes, ticket::BlobTicket, BlobFormat};
+use iroh_blobs::{api::{remote::GetProgressItem}, format::collection::Collection, get::request::get_hash_seq_and_sizes, ticket::BlobTicket, BlobFormat};
 use message_types::WebSocketMessage;
 use names::{Generator, Name};
 use rfd::FileDialog;
@@ -37,6 +37,41 @@ macro_rules! try_or_continue {
     };
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() { 
+    use eframe::wasm_bindgen::JsCast as _;
+    
+    eframe::WebLogger::init(log::LevelFilter::Debug).ok();
+
+    let web_options = eframe::WebOptions::default();
+
+    wasm_bindgen_futures::spawn_local(async {
+        let document = web_sys::window()
+            .expect("no window")
+            .document()
+            .expect("no document");
+        
+        let canvas = document
+            .get_element_by_id("canvas_id")
+            .expect("failed to get canvas id")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("canvas id isn't an HtmlCanvasElement");
+
+        let start_result = eframe::WebRunner::new()
+            .start(canvas, web_options, Box::new(|cc| Ok(Box::new(MyApp::new(cc))))).await;
+
+        if let Some(loading_text) = document.get_element_by_id("loading_text") {
+            match start_result {
+                Ok(_) => loading_text.remove(),
+                Err(e) => {
+                    panic!("app crashed {e:?}");
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -94,6 +129,13 @@ impl MyApp {
             rx,
             tx,
         }
+    }
+
+    fn cleanup(&mut self) {
+       let temp_dir = self.download_dir.join(format!("fling-{}", self.nickname));
+       if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
+            self.tx.try_send(AppEvent::FatalError(anyhow!(e).context(format!("Failed to delete temp dir {:?}, be sure to delete it yourself", temp_dir)))).ok();
+       }
     }
 }
 
@@ -314,7 +356,6 @@ impl eframe::App for MyApp {
                                                                 match Collection::load(ticket.hash(), iroh_node.store.as_ref()).await {
                                                                     Ok(c) => {
                                                                         for (f, h) in c.into_iter() {
-                                                                            println!("file name is {f}");
                                                                             let p = download_dir.join(f);
                                                                             if let Err(e) = iroh_node.store.blobs().export(h, p).await {
                                                                                 tx_clone.send(AppEvent::FatalError(anyhow!(e).context("Error downloading file {p}: {e:?}")))
@@ -558,7 +599,7 @@ impl eframe::App for MyApp {
                             .inner_margin(12.0))
                         .show(ctx, |ui| {
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("Transferring...").color(text_dim).size(11.0));
+                                ui.label(RichText::new("Downloading file(s)...").color(text_dim).size(11.0));
                                 ui.add_space(4.0);
                                 ProgressBar::new(self.progress)
                                     .show_percentage()
@@ -572,11 +613,7 @@ impl eframe::App for MyApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-       // delete temp dir 
-       let temp_dir = self.download_dir.join(format!("fling-{}", self.nickname));
-       if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
-            self.tx.try_send(AppEvent::FatalError(anyhow!(e).context(format!("Failed to delete temp dir {:?}, be sure to delete it yourself", temp_dir)))).ok();
-       }
+        self.cleanup();
     }
 }
 

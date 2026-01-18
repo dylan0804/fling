@@ -1830,6 +1830,7 @@ dependencies = [
  "futures-util",
  "iroh",
  "iroh-blobs",
+ "log",
  "message_types",
  "n0-future",
  "names",
@@ -1838,6 +1839,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
