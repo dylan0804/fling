@@ -164,7 +164,7 @@ async fn read(mut receiver: SplitStream<WebSocket>, tx: Sender<WebSocketMessage>
             Message::Text(bytes) => {
                 match serde_json::from_str::<WebSocketMessage>(bytes.as_str()) {
                     Ok(websocket_msg) => match websocket_msg {
-                        WebSocketMessage::Register { nickname } => {
+                        WebSocketMessage::Register(nickname) => {
                             state.users_list.insert(nickname.clone(), tx.clone());
                             current_username = nickname.clone();
 

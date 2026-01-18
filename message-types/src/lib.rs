@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum WebSocketMessage {
-    Register {
-        nickname: String,
-    },
+    Register(String),
     RegisterSuccess(Vec<String>),
     UserJoined(String),
     UserLeft(String),

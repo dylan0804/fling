@@ -1,5 +1,3 @@
-
-
 use std::{collections::HashSet, path::PathBuf};
 
 use anyhow::{anyhow, Context};
@@ -415,9 +413,7 @@ impl eframe::App for MyApp {
                         });
                     }
                     AppState::PublishUser => {
-                        if let Err(e) = self.to_ws.try_send(WebSocketMessage::Register {
-                            nickname: self.nickname.clone(),
-                        }) {
+                        if let Err(e) = self.to_ws.try_send(WebSocketMessage::Register(self.nickname.clone())) {
                             self.tx
                                 .try_send(AppEvent::FatalError(
                                     anyhow!(e).context("Register send failed"),
