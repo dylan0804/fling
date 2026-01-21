@@ -13,4 +13,4 @@ anyhow.workspace = true
 axum = { version = "0.8.8", features = ["ws", "macros"] }
 axum-extra = { version = "0.12.3", features = ["typed-header"] }
 dashmap = "6.1.0"
-message_types = { path = "../message-types/" }
+shared = { path = "../shared/" }

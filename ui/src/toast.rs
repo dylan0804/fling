@@ -1,9 +1,9 @@
 use egui::WidgetText;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 
-use crate::MyApp;
+use crate::{Network, UI};
 
-impl MyApp {
+impl<N: Network> UI<N> {
     pub fn show_toast(&mut self, text: impl Into<WidgetText>, kind: ToastKind) {
         self.toasts.add(Toast {
             text: text.into(),

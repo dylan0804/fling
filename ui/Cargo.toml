@@ -1,0 +1,16 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+egui_material_icons = "0.5.0"
+egui-toast = "0.19.1"
+tokio-tungstenite = { version = "*", features = ["native-tls"] }
+shared = { path = "../shared/" }

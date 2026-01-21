@@ -21,7 +21,6 @@ pub enum WebSocketMessage {
     },
     ReceiveFile(BlobTicket),
     DownloadFile(BlobTicket),
-
     ErrorDeserializingJson(String),
 }
 

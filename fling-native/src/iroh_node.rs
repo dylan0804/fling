@@ -13,10 +13,8 @@ use iroh_blobs::{
     BlobsProtocol,
 };
 use n0_future::BufferedStreamExt;
-use serde_json::to_string;
-use tokio::sync::mpsc::Sender;
-
-use crate::events::AppEvent;
+use shared::app_events::AppEvent;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub struct IrohNode {
     pub endpoint: Endpoint,
@@ -37,7 +35,11 @@ impl IrohNode {
         })
     }
 
-    pub async fn import(&self, files: Vec<PathBuf>, tx: Sender<AppEvent>) -> Result<TempTag> {
+    pub async fn import(
+        &self,
+        files: Vec<PathBuf>,
+        tx: UnboundedSender<AppEvent>,
+    ) -> Result<TempTag> {
         let collection = files
             .into_iter()
             .map(|p| {
@@ -72,7 +74,6 @@ impl IrohNode {
                                     let context = format!("Error importing {}", name);
                                     tx_clone
                                         .send(AppEvent::FatalError(anyhow!(e).context(context)))
-                                        .await
                                         .ok();
                                 }
                                 _ => {}

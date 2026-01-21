@@ -15,7 +15,7 @@ use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-use message_types::WebSocketMessage;
+use shared::websocket_messages::WebSocketMessage;
 use tokio::{
     net::TcpListener,
     sync::{

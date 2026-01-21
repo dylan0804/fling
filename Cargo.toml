@@ -1,15 +1,26 @@
 [workspace]
 resolver = "2"
-members = ["fling-gui", "fling-server", "message-types"]
+members = ["fling-native", "fling-server", "fling-wasm", "ui", "shared"]
 
 [workspace.dependencies]
+eframe = { version = "0.33.3", default-features = false, features = [
+  "default_fonts", # Embed the default egui fonts.
+  "glow",          # Use the glow rendering backend. Alternative: "wgpu".
+] }
+egui = "0.33.3"
 futures-util = { version = "0.3.31", default-features = false, features = [
   "sink",
   "std",
 ] }
 anyhow = "1.0.100"
-tokio = { version = "1.48.0" }
+tokio = { version = "1.48.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-iroh = "0.95.1"
-iroh-blobs = "0.97.0"
+iroh = { version = "0.95.1", default-features = false }
+iroh-blobs = { version = "0.97.0", default-features = false }
+
+# [profile.release]
+# opt-level = 2 # fast and small wasm
+#
+[profile.dev.package."*"]
+opt-level = 2
