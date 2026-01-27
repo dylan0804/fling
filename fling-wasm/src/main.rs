@@ -50,17 +50,14 @@ impl WasmNetwork {
             };
             let iroh_init = async move {
                 let iroh_node = IrohNode::new().await?;
-                let router = Router::builder(iroh_node.endpoint.clone())
-                    .accept(iroh_blobs::ALPN, iroh_node.blobs_protocol.clone())
-                    .spawn();
 
-                Ok(iroh_node)
+                Ok((iroh_node))
             };
 
             let tx_clone_1 = tx_clone.clone();
             let result = futures::try_join!(ws_init, iroh_init);
             match result {
-                Ok(((mut write, mut read), iroh_node)) => {
+                Ok(((mut write, mut read), (iroh_node))) => {
                     spawn_local(async move {
                         while let Some(msg) = read.next().await {
                             match msg {

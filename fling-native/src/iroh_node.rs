@@ -93,7 +93,7 @@ impl IrohNode {
             .into_iter()
             .map(|(name, tag)| (name, tag.hash()))
             .collect::<Collection>();
-        let tt = collection.clone().store(&self.store).await?;
+        let tt = collection.store(&self.store).await?;
         Ok(tt)
     }
 }

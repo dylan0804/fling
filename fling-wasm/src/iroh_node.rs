@@ -2,7 +2,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use eframe::wasm_bindgen::JsCast;
 use futures::{channel::mpsc::UnboundedSender, stream, SinkExt, StreamExt};
-use iroh::Endpoint;
+use iroh::{protocol::Router, Endpoint};
 use iroh_blobs::{
     api::{blobs::AddProgressItem, TempTag},
     format::collection::Collection,
@@ -20,6 +20,7 @@ pub struct IrohNode {
     pub endpoint: Endpoint,
     pub blobs_protocol: BlobsProtocol,
     store: MemStore,
+    _router: Router,
 }
 
 impl IrohNode {
@@ -27,11 +28,15 @@ impl IrohNode {
         let endpoint = Endpoint::bind().await?;
         let store = MemStore::default();
         let blobs_protocol = BlobsProtocol::new(&store, None);
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_blobs::ALPN, blobs_protocol.clone())
+            .spawn();
 
         Ok(Self {
             endpoint,
             store,
             blobs_protocol,
+            _router: router,
         })
     }
 
@@ -77,30 +82,28 @@ impl IrohNode {
 }
 
 async fn chunk_blob(blob: Blob, mut tx: UnboundedSender<Result<Bytes, std::io::Error>>) {
-    spawn_local(async move {
-        let stream = blob.stream();
-        let reader = stream
-            .get_reader()
-            .dyn_into::<ReadableStreamDefaultReader>()
-            .unwrap();
+    let stream = blob.stream();
+    let reader = stream
+        .get_reader()
+        .dyn_into::<ReadableStreamDefaultReader>()
+        .unwrap();
 
-        loop {
-            let promise = reader.read();
-            let result = JsFuture::from(promise).await.unwrap();
+    loop {
+        let promise = reader.read();
+        let result = JsFuture::from(promise).await.unwrap();
 
-            let done = Reflect::get(&result, &"done".into())
-                .unwrap()
-                .as_bool()
-                .unwrap_or(true);
-            if done {
-                break;
-            }
-
-            let value = Reflect::get(&result, &"value".into()).unwrap();
-            let vec = Uint8Array::from(value).to_vec();
-            let bytes = Bytes::copy_from_slice(&vec);
-            tx.send(Ok(bytes)).await.ok();
+        let done = Reflect::get(&result, &"done".into())
+            .unwrap()
+            .as_bool()
+            .unwrap_or(true);
+        if done {
+            break;
         }
-        drop(tx); // probably not needed
-    });
+
+        let value = Reflect::get(&result, &"value".into()).unwrap();
+        let vec = Uint8Array::from(value).to_vec();
+        let bytes = Bytes::copy_from_slice(&vec);
+        tx.send(Ok(bytes)).await.ok();
+    }
+    drop(tx); // probably not needed
 }
