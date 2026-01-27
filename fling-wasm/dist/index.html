@@ -7,13 +7,13 @@
 
 <head>
   <!-- change this to your project name -->
-  <title>eframe template</title>
+  <title>Fling</title>
 
   <!-- config for our rust wasm binary. go to https://trunkrs.dev/assets/#rust for more customization -->
   
 <script type="module">
-import init, * as bindings from '/fling-web-4bb9cc345138462f.js';
-const wasm = await init({ module_or_path: '/fling-web-4bb9cc345138462f_bg.wasm' });
+import init, * as bindings from '/fling-wasm-ec3f9b90d56319d8.js';
+const wasm = await init({ module_or_path: '/fling-wasm-ec3f9b90d56319d8_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -126,7 +126,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       }
     }
   </style>
-<link rel="modulepreload" href="/fling-web-4bb9cc345138462f.js" crossorigin="anonymous" integrity="sha384-lBoQpSW90u7wUkl8wdRupn5s2uA6VD8CbZXJ0TmDem16fZ+gc6L182u8alwcsq7u"><link rel="preload" href="/fling-web-4bb9cc345138462f_bg.wasm" crossorigin="anonymous" integrity="sha384-1q0dLLJ6/Xx3zGsJdiN671QdxAHa/eAqjMD8Ez1oj4YZdJR0ppmCV66JSOcqtBXR" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/fling-wasm-ec3f9b90d56319d8.js" crossorigin="anonymous" integrity="sha384-kIblgoWEE9BmG6hgtWxRa9pIcMBU+g4xigZNS2u5mfJC7ZnlaVTD2qArDofRN7Ro"><link rel="preload" href="/fling-wasm-ec3f9b90d56319d8_bg.wasm" crossorigin="anonymous" integrity="sha384-/0YNPxb3mnZVovg1lRtZtlaZwI8RrIlTKtmp/xMtbdRL9QXukd+VBTNfZp/D9tZa" as="fetch" type="application/wasm"></head>
 
 <body>
   <!-- The WASM code will resize the canvas dynamically -->
