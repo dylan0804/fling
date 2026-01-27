@@ -1,23 +1,17 @@
-use core::time;
-
 use anyhow::{anyhow, Context, Result};
 use futures::channel::mpsc::{self, UnboundedSender};
 use futures_util::{SinkExt, StreamExt};
-use gloo_net::websocket::{self, futures::WebSocket, Message};
-use iroh::protocol::Router;
+use gloo_net::websocket::{futures::WebSocket, Message};
 use iroh_blobs::ticket::BlobTicket;
 use shared::{
     app_events::AppEvent, network::Network, ui_events::UIEvent,
     websocket_messages::WebSocketMessage,
 };
 use ui::UI;
-use wasm_bindgen_futures::{spawn_local, JsFuture};
+use wasm_bindgen_futures::spawn_local;
 use web_sys::{
-    console::{self, log},
-    js_sys::{self, Array, Function, Reflect, Uint8Array},
-    wasm_bindgen::JsCast,
-    window, Blob, File, FileReader, HtmlInputElement, ReadableStream, ReadableStreamDefaultReader,
-    Window,
+    console::{self},
+    Blob, Window,
 };
 
 use crate::iroh_node::IrohNode;
@@ -25,10 +19,6 @@ use crate::iroh_node::IrohNode;
 mod iroh_node;
 
 const WS_URL: &str = "wss://fling-server.fly.dev/ws";
-
-macro_rules! console_log {
-    ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
-}
 
 struct WasmNetwork {
     to_ws: mpsc::UnboundedSender<UIEvent>,
@@ -50,14 +40,13 @@ impl WasmNetwork {
             };
             let iroh_init = async move {
                 let iroh_node = IrohNode::new().await?;
-
-                Ok((iroh_node))
+                Ok(iroh_node)
             };
 
             let tx_clone_1 = tx_clone.clone();
             let result = futures::try_join!(ws_init, iroh_init);
             match result {
-                Ok(((mut write, mut read), (iroh_node))) => {
+                Ok(((mut write, mut read), iroh_node)) => {
                     spawn_local(async move {
                         while let Some(msg) = read.next().await {
                             match msg {
