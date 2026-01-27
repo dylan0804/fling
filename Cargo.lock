@@ -1442,14 +1442,20 @@ dependencies = [
 name = "fling-wasm"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bytes",
  "eframe",
  "egui",
+ "futures",
  "futures-util",
  "gloo-net",
  "iroh",
  "iroh-blobs",
  "log",
+ "rfd",
+ "serde_json",
  "shared",
+ "ui",
  "wasm-bindgen-futures",
  "web-sys",
 ]
@@ -4716,11 +4722,13 @@ name = "shared"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "iroh",
- "iroh-blobs",
+ "async-trait",
+ "futures",
+ "rfd",
  "serde",
  "serde_json",
  "tokio",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -5478,10 +5486,11 @@ dependencies = [
  "egui",
  "egui-toast",
  "egui_material_icons",
+ "rfd",
  "serde_json",
  "shared",
  "tokio",
- "tokio-tungstenite",
+ "web-sys",
 ]
 
 [[package]]

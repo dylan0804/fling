@@ -1,15 +1,18 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-use futures_util::StreamExt;
+use futures_util::{stream, StreamExt};
 use iroh::Endpoint;
 use iroh_blobs::{
     api::{
-        blobs::{AddPathOptions, AddProgressItem},
+        blobs::{AddBytesOptions, AddPathOptions, AddProgressItem},
         TempTag,
     },
     format::collection::Collection,
-    store::fs::FsStore,
+    store::{
+        fs::{self, FsStore},
+        mem::MemStore,
+    },
     BlobsProtocol,
 };
 use n0_future::BufferedStreamExt;
@@ -62,7 +65,6 @@ impl IrohNode {
                         mode: iroh_blobs::api::blobs::ImportMode::TryReference,
                         format: iroh_blobs::BlobFormat::Raw,
                     });
-
                     let mut stream = import.stream().await;
                     let temp_tag = loop {
                         if let Some(item) = stream.next().await {

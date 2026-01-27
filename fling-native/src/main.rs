@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -8,9 +8,13 @@ use iroh_blobs::{
     get::request::get_hash_seq_and_sizes, ticket::BlobTicket, BlobFormat,
 };
 use names::{Generator, Name};
+use rfd::AsyncFileDialog;
 use serde_json::{self};
-use shared::{app_events::AppEvent, network::Network, websocket_messages::WebSocketMessage};
-use tokio::sync::mpsc::{self};
+use shared::{
+    app_events::AppEvent, network::Network, ui_events::UIEvent,
+    websocket_messages::WebSocketMessage,
+};
+use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use ui::UI;
 
@@ -36,13 +40,13 @@ macro_rules! try_or_continue {
 pub struct NativeNetwork {
     tx: mpsc::UnboundedSender<AppEvent>,
     rx: mpsc::UnboundedReceiver<AppEvent>,
-    to_ws: mpsc::UnboundedSender<WebSocketMessage>,
+    to_ws: mpsc::UnboundedSender<UIEvent>,
 }
 
 impl NativeNetwork {
     fn new(nickname: String, download_dir: PathBuf) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
-        let (to_ws, mut from_ui) = mpsc::unbounded_channel::<WebSocketMessage>();
+        let (to_ws, mut from_ui) = mpsc::unbounded_channel::<UIEvent>();
 
         let tx_clone = tx.clone();
         let tx_clone_1 = tx.clone();
@@ -103,9 +107,14 @@ impl NativeNetwork {
                         let tx_clone = tx_clone.clone();
                         let download_dir = download_dir.clone();
                         tokio::spawn(async move {
-                            while let Some(websocket_msg) = from_ui.recv().await {
-                                match websocket_msg {
-                                    WebSocketMessage::PrepareFile { recipient, files } => {
+                            while let Some(ui_event) = from_ui.recv().await {
+                                match ui_event {
+                                    UIEvent::PrepareFile { recipient, files } => {
+                                        let files = files
+                                            .into_iter()
+                                            .map(|f| f.path().to_owned())
+                                            .collect::<Vec<_>>();
+
                                         tx_clone.send(AppEvent::ImportStart).ok();
                                         let tt = try_or_continue!(
                                             iroh_node.import(files, tx_clone.clone()).await,
@@ -117,7 +126,8 @@ impl NativeNetwork {
                                             iroh_node.endpoint.addr(),
                                             tt.hash(),
                                             BlobFormat::HashSeq,
-                                        );
+                                        )
+                                        .to_string();
 
                                         let json = WebSocketMessage::SendFile { recipient, ticket }
                                             .to_json();
@@ -130,7 +140,21 @@ impl NativeNetwork {
                                             tx_clone.send(AppEvent::FatalError(e)).ok();
                                         }
                                     }
-                                    WebSocketMessage::DownloadFile(ticket) => {
+                                    UIEvent::DownloadFile(ticket) => {
+                                        let ticket = match BlobTicket::from_str(&ticket) {
+                                            Ok(ticket) => ticket,
+                                            Err(e) => {
+                                                tx_clone
+                                                    .send(AppEvent::FatalError(
+                                                        anyhow!(e).context(
+                                                            "Failed parsing to blob ticket",
+                                                        ),
+                                                    ))
+                                                    .ok();
+                                                continue;
+                                            }
+                                        };
+
                                         let downloader =
                                             iroh_node.store.downloader(&iroh_node.endpoint);
                                         match downloader
@@ -165,7 +189,7 @@ impl NativeNetwork {
                                                         get_hash_seq_and_sizes(
                                                             &connection,
                                                             &ticket.hash(),
-                                                            1024 * 1024 * 1024 * 5,
+                                                            1024 * 1024 * 1024 * 5, // 5gb
                                                             None
                                                         )
                                                         .await,
@@ -221,12 +245,6 @@ impl NativeNetwork {
                                                                     .ok();
                                                             }
                                                         }
-                                                        iroh_node
-                                                            .store
-                                                            .tags()
-                                                            .delete_all()
-                                                            .await
-                                                            .unwrap();
                                                     }
                                                     Err(e) => {
                                                         tx_clone
@@ -249,6 +267,8 @@ impl NativeNetwork {
                                         let _ = &router;
                                     }
                                     _ => {
+                                        let websocket_msg =
+                                            ui_event.to_ws().expect("shouldn't happen");
                                         let json = websocket_msg.to_json();
                                         if let Err(e) = sender
                                             .send(Message::Text(json.into()))
@@ -277,11 +297,11 @@ impl NativeNetwork {
 }
 
 impl Network for NativeNetwork {
-    fn send(&self, event: AppEvent) -> Result<()> {
-        self.tx.send(event).context("receiver is closed")
+    fn send(&self, event: AppEvent) {
+        self.tx.send(event).ok();
     }
 
-    fn send_ws(&self, ws_msg: WebSocketMessage) -> Result<()> {
+    fn send_ws(&self, ws_msg: UIEvent) -> Result<()> {
         self.to_ws.send(ws_msg).context("ws receiver is closed")
     }
 
@@ -289,8 +309,14 @@ impl Network for NativeNetwork {
         self.rx.try_recv().ok()
     }
 
-    fn clone_tx(&self) -> mpsc::UnboundedSender<AppEvent> {
-        self.tx.clone()
+    fn open_file_dialog(&mut self) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let files = AsyncFileDialog::new().pick_files().await;
+            if let Some(file_handles) = files {
+                tx.send(AppEvent::ReceivedFile(file_handles)).ok();
+            };
+        });
     }
 }
 

@@ -4,19 +4,18 @@ use anyhow::anyhow;
 use eframe::CreationContext;
 use egui::{ahash::{HashSet, HashSetExt}, vec2, Align2, Color32, CornerRadius, Id, LayerId, ProgressBar, RichText, Stroke, Vec2, Widget};
 use egui_toast::{ToastKind, Toasts};
-use shared::{app_events::AppEvent, app_state::AppState, network::Network, websocket_messages::WebSocketMessage};
-use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message;
+use rfd::FileHandle;
+use shared::{app_events::AppEvent, app_state::AppState, network::Network, ui_events::UIEvent, websocket_messages::WebSocketMessage};
 
 mod toast;
 
-pub struct UI<N: Network> {
+pub struct UI<N> {
     network: N,
     app_state: AppState,
     nickname: String,
     users: HashSet<String>,
     toasts: Toasts,
-    files: Vec<PathBuf>,
+    files: Vec<rfd::FileHandle>,
     download_dir: PathBuf,
     is_downloading: bool,
     is_importing: bool,
@@ -33,7 +32,7 @@ impl<N: Network> UI<N> {
 
         Self {
             app_state: AppState::Connecting,
-            files: vec![],
+            files: Vec::new(),
             users: HashSet::new(),
             is_downloading: false,
             is_importing: false,
@@ -52,8 +51,8 @@ impl<N: Network> UI<N> {
                 .send(AppEvent::FatalError(anyhow!(e).context(format!(
                     "Failed to delete temp dir {:?}, be sure to delete it yourself",
                     temp_dir
-                ))))
-                .ok();
+                ))));
+    
         }
     }
 }
@@ -107,6 +106,9 @@ impl<N: Network> eframe::App for UI<N> {
                         AppEvent::RemoveUser(nickname) => {
                             self.users.remove(&nickname);
                         }
+                        AppEvent::ReceivedFile(files) => {
+                            self.files.extend(files);
+                        }
                         AppEvent::UpdateProgressValue(value) => {
                             self.progress = value;
                         }
@@ -114,7 +116,7 @@ impl<N: Network> eframe::App for UI<N> {
                         AppEvent::ImportDone => self.is_importing = false,
                         AppEvent::DownloadStart => self.is_downloading = true,
                         AppEvent::DownloadFile(ticket) => {
-                            self.network.send_ws(WebSocketMessage::DownloadFile(ticket)).ok();
+                            self.network.send_ws(UIEvent::DownloadFile(ticket)).ok();
                         }
                         AppEvent::DownloadDone => self.is_downloading = false,
                         AppEvent::FatalError(e) => {
@@ -133,12 +135,11 @@ impl<N: Network> eframe::App for UI<N> {
                         });
                     } 
                     AppState::PublishUser => {
-                        if let Err(e) = self.network.send_ws(WebSocketMessage::Register(self.nickname.clone())) {
+                        if let Err(e) = self.network.send_ws(UIEvent::Register(self.nickname.clone())) {
                             self.network
                                 .send(AppEvent::FatalError(
                                     anyhow!(e).context("Register send failed"),
-                                ))
-                                .ok();
+                                ));
                         }
                         self.app_state = AppState::WaitForRegisterConfirmation;
                     }
@@ -165,16 +166,24 @@ impl<N: Network> eframe::App for UI<N> {
                                         ui.label(RichText::new("📁").size(32.0));
                                         ui.add_space(8.0);
                                         if ui.link(RichText::new("Click to select a file").color(accent_color).size(14.0)).clicked() {
-                                            // if let Some(file) = FileDialog::new().set_directory("/").pick_files() {
-                                            //     self.files.extend(file);
-                                            // }
+                                            self.network.open_file_dialog();
                                         }
+
+                                        #[cfg(not(target_arch = "wasm32"))]
                                         ui.label(RichText::new("or drag and drop").color(text_dim).size(12.0));
                                     } else {
                                         ui.add_space(8.0);
                                         let mut file_to_remove: Option<usize> = None;
                                         ui.spacing_mut().item_spacing = vec2(8., 8.);
                                         for (index, file) in self.files.iter().enumerate() {
+                                            let file = file.inner();
+
+                                            #[cfg(target_arch = "wasm32")]
+                                            let file_name = file.name();
+
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            let file_name = file.file_name().unwrap_or_default().to_string_lossy().to_string();
+
                                             egui::Frame::default()
                                                 .corner_radius(8)
                                                 .fill(Color32::from_rgb(45, 45, 50))
@@ -194,7 +203,7 @@ impl<N: Network> eframe::App for UI<N> {
                                                         });
                                                         ui.add_space(4.0);
                                                         ui.label(
-                                                            RichText::new(file.file_name().unwrap_or_default().to_string_lossy())
+                                                            RichText::new(file_name)
                                                                 .size(12.0)
                                                         );
                                                     });
@@ -209,9 +218,7 @@ impl<N: Network> eframe::App for UI<N> {
 
                                         ui.horizontal(|ui| {
                                             if ui.link(RichText::new("+ Add more files").color(accent_color).size(12.0)).clicked() {
-                                                // if let Some(files) = FileDialog::new().set_directory("/").pick_files() {
-                                                //     self.files.extend(files);
-                                                // }
+                                                self.network.open_file_dialog();
                                             }
                                             ui.label(RichText::new("•").color(text_dim).size(12.0));
                                             if ui.link(RichText::new("Clear all").color(accent_color).size(12.0)).clicked() {
@@ -259,15 +266,14 @@ impl<N: Network> eframe::App for UI<N> {
                                                         .fill(if has_file { accent_color } else { bg_dark })
                                                         .corner_radius(6.0);
                                                     if ui.add_enabled(has_file, btn).clicked() {
-                                                        if let Err(e) = self.network.send_ws(WebSocketMessage::PrepareFile {
+                                                        if let Err(e) = self.network.send_ws(UIEvent::PrepareFile {
                                                             recipient: user.clone(),
                                                             files: self.files.clone(),
                                                         }) {
                                                             self.network
                                                                 .send(AppEvent::FatalError(
                                                                     anyhow!(e).context("failed to send websocket msg"),
-                                                                ))
-                                                                .ok();
+                                                                ));
                                                         }
                                                     }
                                                 });
@@ -278,16 +284,21 @@ impl<N: Network> eframe::App for UI<N> {
                             });
                         }
 
-                        preview_files_being_dropped(ctx);
-
-                        ctx.input(|i| {
-                            if !i.raw.dropped_files.is_empty() {
-                                let dropped_files = i.raw.dropped_files.iter()
-                                    .map(|d| d.path.clone().unwrap_or_default())
-                                    .collect::<Vec<_>>();
-                                self.files.extend(dropped_files);
-                            }
-                        });
+                        #[cfg(not(target_arch = "wasm32"))]    
+                        {
+                            preview_files_being_dropped(ctx);
+                            ctx.input(|i| {
+                                if !i.raw.dropped_files.is_empty() {
+                                    let dropped_files = i.raw.dropped_files.iter()
+                                        .map(|d| {
+                                            let pb = d.path.clone().unwrap_or_default();
+                                            FileHandle::from(pb)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    self.files.extend(dropped_files);
+                                }
+                            });
+                        }
                     }
                 }
 
@@ -304,7 +315,6 @@ impl<N: Network> eframe::App for UI<N> {
                                 ui.label(RichText::new("Preparing files...").color(text_dim).size(11.0));
                             });
                         });
-                    ctx.request_repaint();
                 }
 
                 // progress bar
@@ -325,6 +335,7 @@ impl<N: Network> eframe::App for UI<N> {
                 }
 
                 self.toasts.show(ctx);
+                ctx.request_repaint();
             });
     }
 
@@ -333,40 +344,7 @@ impl<N: Network> eframe::App for UI<N> {
     }
 }
 
-async fn process_message(msg: Message, tx: mpsc::UnboundedSender<AppEvent>) {
-    if let Message::Text(bytes) = msg {
-        match serde_json::from_str::<WebSocketMessage>(bytes.as_str()) {
-            Ok(websocket_msg) => match websocket_msg {
-                WebSocketMessage::RegisterSuccess(current_users) => {
-                    tx.send(AppEvent::RegisterSuccess(current_users)).ok();
-                }
-                WebSocketMessage::UserJoined(nickname) => {
-                    tx.send(AppEvent::AddNewUser(nickname)).ok();
-                }
-                WebSocketMessage::UserLeft(nickname) => {
-                    tx.send(AppEvent::RemoveUser(nickname)).ok();
-                }
-                WebSocketMessage::ReceiveFile(ticket) => {
-                    tx.send(AppEvent::DownloadFile(ticket)).ok();
-                }
-                WebSocketMessage::ErrorDeserializingJson(e) => {
-                    tx.send(AppEvent::FatalError(
-                        anyhow!(e).context("Server JSON error"),
-                    ))
-                    .ok();
-                }
-                _ => {}
-            },
-            Err(e) => {
-                tx.send(AppEvent::FatalError(
-                    anyhow!(e).context("Message parse failed"),
-                ))
-                .ok();
-            }
-        }
-    }
-}
-
+#[cfg(not(target_arch = "wasm32"))]
 fn preview_files_being_dropped(ctx: &egui::Context) {
     use std::fmt::Write as _;
 

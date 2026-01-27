@@ -8,9 +8,14 @@ eframe.workspace = true
 egui.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 
 egui_material_icons = "0.5.0"
 egui-toast = "0.19.1"
-tokio-tungstenite = { version = "*", features = ["native-tls"] }
+rfd = { version = "0.17.1", features = ["file-handle-inner"] }
 shared = { path = "../shared/" }
+
+# [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3.70", features = ["console"] }

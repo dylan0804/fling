@@ -7,12 +7,24 @@ edition = "2024"
 eframe.workspace = true
 egui.workspace = true
 futures-util.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
 
 log = "0.4.29"
-iroh = { workspace = true, default-features = true }
-iroh-blobs = { workspace = true, default-features = true }
+ui = { path = "../ui/" }
 shared = { path = "../shared/" }
-
-gloo-net = "0.6.0"
+gloo-net = { version = "0.6.0", features = ["websocket"] }
 wasm-bindgen-futures = "0.4.50"
-web-sys = { version = "0.3.70", features = ["console"] }
+web-sys = { version = "0.3.70", features = [
+  "console",
+  "Crypto",
+  "FileReader",
+  "Blob",
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+] }
+iroh = { version = "0.95.1", default-features = false }
+iroh-blobs = { version = "0.97.0", default-features = false }
+futures = "0.3.31"
+rfd = { version = "0.17.1", features = ["file-handle-inner"] }
+bytes = "1.11.0"

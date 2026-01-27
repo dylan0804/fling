@@ -4,11 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iroh.workspace = true
-iroh-blobs.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-tokio.workspace = true
 serde = { workspace = true, features = ["derive"] }
-# iroh = { workspace = true, default-features = false }
-# iroh-blobs = { workspace = true, default-features = false }
+
+rfd = { version = "0.17.1", features = ["file-handle-inner"] }
+async-trait = "0.1.89"
+futures = "0.3.31"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4.50"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true
