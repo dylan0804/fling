@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use futures_util::{stream, StreamExt};
-use iroh::Endpoint;
+use iroh::{protocol::Router, Endpoint};
 use iroh_blobs::{
     api::{
         blobs::{AddBytesOptions, AddPathOptions, AddProgressItem},
@@ -23,6 +23,7 @@ pub struct IrohNode {
     pub endpoint: Endpoint,
     pub store: FsStore,
     pub blobs: BlobsProtocol,
+    _router: Router,
 }
 
 impl IrohNode {
@@ -30,11 +31,15 @@ impl IrohNode {
         let endpoint = Endpoint::bind().await?;
         let store = FsStore::load(download_dir.join(format!("fling-{}", path))).await?;
         let blobs = BlobsProtocol::new(&store, None);
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_blobs::ALPN, blobs.clone())
+            .spawn();
 
         Ok(Self {
             endpoint,
             store,
             blobs,
+            _router: router,
         })
     }
 
@@ -89,11 +94,14 @@ impl IrohNode {
             .collect::<Vec<_>>()
             .await;
 
-        let collection = infos
+        let (collection, tags) = infos
             .into_iter()
-            .map(|(name, tag)| (name, tag.hash()))
-            .collect::<Collection>();
+            .map(|(name, tag)| ((name, tag.hash()), tag))
+            .unzip::<_, _, Collection, Vec<_>>();
+
         let tt = collection.store(&self.store).await?;
+        drop(tags);
+
         Ok(tt)
     }
 }
