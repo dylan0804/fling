@@ -2,6 +2,9 @@
 
 A peer-to-peer file transfer app built entirely in Rust. Sending files has never been easier.
 
+## Web-based version
+https://dylanch.pro/fling
+
 ## How it works
 
 Fling uses [Iroh](https://github.com/n0-computer/iroh) for peer-to-peer connectivity, handling NAT traversal and hole punching so files travel directly between clients. A lightweight signaling (websocket) server (built with [Axum](https://github.com/tokio-rs/axum)) coordinates the initial connection handshake, but file data never passes through it.
